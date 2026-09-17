@@ -89,6 +89,7 @@ interface GitStatus {
   branch?: string;
   changes: GitChange[];
   message?: string;
+  otherChanges: number;
 }
 
 interface TreeNode {
@@ -1007,6 +1008,11 @@ function Workspace() {
                   {git?.branch ? `分支 ${git.branch} · ` : ''}
                   {git ? `${git.changes.length} 个文件` : ''} · 只提交 source/ 与 derived/
                 </p>
+                {git && git.otherChanges > 0 && (
+                  <p className="meta hint">
+                    另有 {git.otherChanges} 个非文档条目（代码等）未提交，不归这个工具管
+                  </p>
+                )}
               </div>
               <div className="actions">
                 <button

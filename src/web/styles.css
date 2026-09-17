@@ -773,11 +773,17 @@ textarea {
   margin-top: 0.3rem;
 }
 
+.pane-review header .hint {
+  color: var(--ink-3);
+  font-family: var(--sans);
+  font-size: 0.72rem;
+}
+
 .git-body {
   display: grid;
   flex: 1;
   gap: 0;
-  grid-template-columns: 16.5rem 1fr;
+  grid-template-columns: 19rem 1fr;
   min-height: 0;
 }
 
@@ -806,6 +812,11 @@ textarea {
   width: 100%;
 }
 
+.git-files button > .badge,
+.git-files button > .stat {
+  flex: none;
+}
+
 .git-files button:hover {
   background: var(--paper);
 }
@@ -817,6 +828,8 @@ textarea {
 }
 
 .git-files .path {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -825,7 +838,7 @@ textarea {
 .git-files .stat {
   font-family: var(--mono);
   font-size: 0.66rem;
-  margin-left: auto;
+  white-space: nowrap;
 }
 
 .git-files .stat .add {

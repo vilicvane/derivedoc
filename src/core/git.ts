@@ -21,6 +21,8 @@ export interface GitStatus {
   changes: GitChange[];
   /** 待提交的 commit message（存在 .derivedoc/commit-message 里） */
   message?: string;
+  /** 工作区里不属于两层文档、但同样未提交的条目数（代码等） */
+  otherChanges: number;
 }
 
 export interface GitCommitResult {
@@ -58,25 +60,35 @@ export async function gitStatus(root: string): Promise<GitStatus> {
   const inside = await run(root, ['rev-parse', '--is-inside-work-tree']);
 
   if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
-    return {available: false, reason: '这个目录不在 git 仓库里', changes: []};
+    return {available: false, reason: '这个目录不在 git 仓库里', changes: [], otherChanges: 0};
   }
 
-  const [branch, status, message, prefix] = await Promise.all([
+  const [branch, status, message, prefix, overall] = await Promise.all([
     run(root, ['rev-parse', '--abbrev-ref', 'HEAD']),
     run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...SCOPES]),
     readMessage(root),
     repoPrefix(root),
+    // 目录不展开，否则 node_modules 会撑出几千条。
+    run(root, ['status', '--porcelain', '--', '.']),
   ]);
 
   const changes = parsePorcelain(status.stdout, prefix);
   await attachLineStats(root, changes, prefix);
+  const otherChanges = parsePorcelain(overall.stdout, prefix).filter(
+    change => !isDocPath(change.path),
+  ).length;
 
   return {
     available: true,
     branch: branch.code === 0 ? branch.stdout.trim() : undefined,
     changes,
     message,
+    otherChanges,
   };
+}
+
+function isDocPath(relPath: string): boolean {
+  return SCOPES.some(scope => relPath === scope || relPath.startsWith(`${scope}/`));
 }
 
 /** 给每个变更文件补上 +/− 行数，方便批量审阅时先扫一眼大小。 */

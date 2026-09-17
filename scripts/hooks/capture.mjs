@@ -99,6 +99,26 @@ try {
   // 子会话没写出结果，保持为空。
 }
 
+const succeeded = code === 0 && Boolean(thinking);
+
+// 变更优先以子会话自报的 TOUCHED 为准，再用捕获前后的修订号兜底（取并集）：
+// 修订号快照在这条链路上不够可靠，实测有时看不到子会话刚写下的改动。
+const touchedMatch = /\n?TOUCHED:\s*(.*)\s*$/m.exec(thinking);
+const reported = (touchedMatch?.[1] ?? '')
+  .split(',')
+  .map(item => item.trim())
+  .filter(Boolean);
+const byRevision = [...after]
+  .filter(([id, revision]) => before.get(id) !== revision)
+  .map(([id]) => id);
+const changed = succeeded ? [...new Set([...reported, ...byRevision])] : [];
+
+if (touchedMatch) {
+  // 这行是给机器读的，不留在思考正文里。
+  thinking = thinking.slice(0, touchedMatch.index).trimEnd();
+  await fs.writeFile(outFile, `${thinking}\n`, 'utf8');
+}
+
 await fs.appendFile(
   logFile,
   `${JSON.stringify({
@@ -108,11 +128,14 @@ await fs.appendFile(
     sessionId,
     prompt: prompt.slice(0, 200),
     thinkingChars: thinking.length,
+    before: before.size,
+    after: after.size,
+    changed,
     stderr: code === 0 ? undefined : stderr.slice(-500),
   })}\n`,
 );
 
-if (code !== 0 || !thinking) {
+if (!succeeded) {
   await fs.rm(outFile, {force: true});
   emit(
     `derivedoc：这条消息的捕获没有产出（退出码 ${code}）。详情见 ${path.relative(workspaceRoot, logFile)}。`,
@@ -128,10 +151,6 @@ if (code !== 0 || !thinking) {
   });
   process.exit(0);
 }
-
-const changed = [...after]
-  .filter(([id, revision]) => before.get(id) !== revision)
-  .map(([id]) => id);
 
 emit(
   [
@@ -209,23 +228,27 @@ function buildInstruction(root, prompt) {
     '按顺序做这几件事：',
     '',
     `1. \`dd ${root} ls\` 看有哪些文档，用 \`dd ${root} read <id>\` 读相关的 source 与 derived。`,
-    '2. 把这条消息里的**决定**逐条找出来。一条消息里可能同时提出好几件事——有几条决定就',
-    `   写几条，用 \`dd ${root} append <id> '## 决定：……'\` 各自追加到最合适的 source 文档`,
-    '   （必要时先建新文档）。不要合并成一条笼统的「用户提了几个需求」，也不要因为其中一部',
-    '   分不算决定就把整条跳过。',
-    '3. 只有表达方向、约束、取舍、需求的话才算决定（「我希望…」「必须有…」「不要…」',
-    '   「改成…」）。以下都不算：提问、确认、闲聊、局部细节调整、以及你自己拿的主意——',
-    '   实现细节、命名、代码怎么写都不是决定。拿不准就不写，宁缺毋滥。',
-    '   只写决定本身：不要写测试记录、验证步骤、待办、计划、过程回顾。',
-    '   记录时尽量保留用户的措辞，不要改写成你自己的说法——这段要能溯源回原话。',
+    '2. source 读起来要像精简的产品内部手册：一件事一个 `##` 小节，直接写规则，讲清是什么、',
+    '   为什么、边界在哪。**不要给每条加「决定：」前缀**，也不要写会议纪要式的流水。',
+    `   用 \`dd ${root} append <id> '## 小节名\\n\\n规则…'\` 写进最合适的 source 文档`,
+    '   （必要时先建新文档）；优先补进已有的相关小节，没有合适的再新开。',
+    '   一条消息里可能同时提出好几件事——有几件事就写几处，不要合并成一句笼统的「用户提了',
+    '   几个需求」，也不要因为其中一部分不算决定就整条跳过。',
+    '3. 只有表达方向、约束、取舍、需求的话才写（「我希望…」「必须有…」「不要…」「改成…」）。',
+    '   以下都不写：提问、确认、闲聊、局部细节调整、以及你自己拿的主意——实现细节、命名、',
+    '   代码怎么写都不算。拿不准就不写，宁缺毋滥。',
+    '   只写规则本身：不要写测试记录、验证步骤、计划、过程回顾。尽量保留用户的措辞，便于溯源。',
+    '   这条消息里提到、但还没做的事，单独一行标 `TODO: …`；已经做完的不要标。',
     '4. 默认不动 derived。只有这条消息明确改变了设计，且你能指出具体是哪一节时，才改那一',
-    '   节；不要调整文档结构，不要新增「验证」「下一步」「待办」之类的小节。不确定就留着',
-    '   不动。',
+    '   节；不要调整文档结构，也不要新增「验证」「下一步」这类小节（没做完的事按上面写',
+    '   TODO 行，而不是开一节）。不确定就留着不动。',
     `5. 如果确实改了文档，把一句话摘要覆盖写进 ${root}/.derivedoc/commit-message（例如`,
     '   「记录注入方式的选择」），供用户一键提交时使用；没改文档就不要动这个文件。',
     '6. 最后把「这条消息意味着什么」的思考过程作为最终回复输出：按时间顺序、包含中间结论',
     '   与转折原因，第一人称（你就是主会话），完整但精简，能被接下来的思考直接接上。不要',
     '   写成报告或清单。',
+    '7. 思考的最后另起一行写 `TOUCHED: <逗号分隔的文档 id>`，报告你这一轮改了哪些 source /',
+    '   derived 文档；一篇都没改就写 `TOUCHED:`。这行是机器读的，必须准确。',
     '',
     '约束：不动无关文档；不重写整篇 source；不臆造用户没说的需求；一条消息里多件事就分成',
     '多条记录。',

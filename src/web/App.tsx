@@ -27,6 +27,7 @@ import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/dif
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
 import {api, ApiError, messageOf} from './api.ts';
+import {ReviewPane} from './components/ReviewPane.tsx';
 import {useDocSession} from './hooks/useDocSession.ts';
 import {useDocs} from './hooks/useDocs.ts';
 import {useGitReview} from './hooks/useGitReview.ts';
@@ -135,6 +136,14 @@ function Workspace() {
   const {docs, tree, flatDocs, hits, loadDocs} = useDocs(workspaceId, filter);
   const {workspace, workspaces, loadWorkspaces} = useWorkspaces(workspaceId);
 
+  const gitReview = useGitReview(workspaceId, {
+    review: gitOpen,
+    notify,
+    onCommitted: async () => {
+      await loadDocs();
+    },
+  });
+
   const {
     status: git,
     file: gitFile,
@@ -153,13 +162,7 @@ function Workspace() {
     loadDiff: loadGitDiff,
     stage,
     commit,
-  } = useGitReview(workspaceId, {
-    review: gitOpen,
-    notify,
-    onCommitted: async () => {
-      await loadDocs();
-    },
-  });
+  } = gitReview;
 
   const {
     doc,
@@ -839,160 +842,11 @@ function Workspace() {
       </aside>
       <main className="main">
         {gitOpen && (
-          <section className="git pane pane-review">
-            <header>
-              <div>
-                <h2>审阅改动</h2>
-                <p className="meta">
-                  {git?.branch ? `分支 ${git.branch} · ` : ''}
-                  {git ? `${git.changes.length} 个文件` : ''} · 只提交 source/ 与 derived/
-                </p>
-                {git && git.otherChanges > 0 && (
-                  <p className="meta hint">
-                    另有 {git.otherChanges} 个非文档条目（代码等）未提交，不归这个工具管
-                  </p>
-                )}
-              </div>
-              <div className="actions">
-                {git && git.changes.length > 0 && (
-                  <button
-                    className="stage-button"
-                    onClick={() => void stage()}
-                    title="把两层文档的改动全部暂存"
-                    type="button"
-                  >
-                    全部暂存
-                  </button>
-                )}
-                <button
-                  onClick={() => (selected ? openDoc(selected) : navigate(`/w/${workspaceId}/`))}
-                  title="回到文档"
-                  type="button"
-                >
-                  <X size={14} />
-                  关闭
-                </button>
-              </div>
-            </header>
-            {!git?.available ? (
-              <p className="meta git-fallback">{git?.reason ?? '拿不到 git 状态'}</p>
-            ) : (
-              <>
-                <div className="git-body">
-                  <ul className="git-files">
-                    <li className="git-files-head">
-                      <span className="git-files-count">{git.changes.length} 个文件</span>
-                      <div className="segmented" role="group" aria-label="diff 基准">
-                        <button
-                          className={reviewBase === 'head' ? 'on' : ''}
-                          onClick={() => setReviewBase('head')}
-                          title="与已提交版本比较"
-                          type="button"
-                        >
-                          HEAD
-                        </button>
-                        <button
-                          className={reviewBase === 'index' ? 'on' : ''}
-                          onClick={() => setReviewBase('index')}
-                          title="与暂存区比较"
-                          type="button"
-                        >
-                          暂存区
-                        </button>
-                      </div>
-                    </li>
-                    {git.changes.map(change => (
-                      <li key={change.path}>
-                        <div
-                          className={`git-row layer-${change.path.startsWith('source/') ? 'source' : 'derived'}${
-                            gitFile === change.path ? ' active' : ''
-                          }`}
-                        >
-                          <button
-                            className="git-pick"
-                            onClick={() => setGitFile(change.path)}
-                            type="button"
-                          >
-                            <span className="path">{change.path}</span>
-                            {change.added !== undefined && (
-                              <span
-                                className={`stat${change.index !== ' ' && change.index !== '?' ? ' staged' : ''}`}
-                                title={statusLabel(change)}
-                              >
-                                <span className="add">+{change.added}</span>{' '}
-                                <span className="remove">−{change.removed ?? 0}</span>
-                              </span>
-                            )}
-                          </button>
-                          {hasUnstaged(change) && (
-                            <button
-                              className="git-stage"
-                              onClick={() => void stage(change.path)}
-                              title="暂存这个文件"
-                              type="button"
-                            >
-                              <Plus size={12} />
-                            </button>
-                          )}
-                          {isStaged(change) && (
-                            <button
-                              className="git-stage"
-                              onClick={() => void stage(change.path, true)}
-                              title="取消暂存"
-                              type="button"
-                            >
-                              <Minus size={12} />
-                            </button>
-                          )}
-                        </div>
-                      </li>
-                    ))}
-                    {git.changes.length === 0 && <li className="empty">没有未提交的文档改动</li>}
-                  </ul>
-                  <div className="git-diff">
-                    {gitSides ? (
-                      <MarkdownDiff
-                        modified={gitSides.modified}
-                        onPick={gitFile ? recordPick : undefined}
-                        original={gitSides.original}
-                      />
-                    ) : (
-                      <pre>
-                        {parseGitDiff(gitDiffText).map((line, index) => (
-                          <div className={`line ${line.type}`} key={index}>
-                            <span className="sign">
-                              {line.type === 'add' ? '+' : line.type === 'remove' ? '−' : ' '}
-                            </span>
-                            <span>{line.text}</span>
-                          </div>
-                        ))}
-                      </pre>
-                    )}
-                  </div>
-                </div>
-                <div className="git-commit">
-                  <textarea
-                    placeholder="commit message（提交前可以改）"
-                    value={gitMessage}
-                    onChange={event => setGitMessage(event.target.value)}
-                  />
-                  <button
-                    className="primary"
-                    disabled={gitBusy || commitCount === 0}
-                    onClick={() => void commit()}
-                    title={
-                      stagedCount > 0
-                        ? `只提交已暂存的 ${stagedCount} 篇`
-                        : `把 ${commitCount} 篇文档的改动一起提交`
-                    }
-                    type="button"
-                  >
-                    提交 {commitCount} 个
-                  </button>
-                </div>
-              </>
-            )}
-          </section>
+          <ReviewPane
+            git={gitReview}
+            onClose={() => (selected ? openDoc(selected) : navigate(`/w/${workspaceId}/`))}
+            onPick={recordPick}
+          />
         )}
         {!gitOpen && doc ? (
           <div className="pane">

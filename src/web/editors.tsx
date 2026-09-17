@@ -1,4 +1,3 @@
-import {DiffEditor, Editor, loader} from '@monaco-editor/react';
 import {useEffect, useRef, useState} from 'react';
 import editorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 // 只引编辑器核心 + markdown 高亮，不引整套语言与 LSP：dev 的依赖预打包和线上包体积
@@ -23,7 +22,6 @@ import 'monaco-editor/languages/definitions/markdown/register.js';
 // 本地打包 Monaco（不走 CDN）。所有语言都复用基础 editor worker——这个项目只编辑
 // markdown，不需要 ts/json/css/html 那几套语言服务，也省掉几个 MB 的 worker 产物。
 self.MonacoEnvironment = {getWorker: () => new editorWorker()};
-loader.config({monaco});
 
 // 编辑器主题跟着界面色板走，别让编辑器像嵌进来的另一个产品。
 monaco.editor.defineTheme('derivedoc-light', {
@@ -31,7 +29,7 @@ monaco.editor.defineTheme('derivedoc-light', {
   inherit: true,
   rules: [
     {token: 'keyword', foreground: 'b23a1a', fontStyle: 'bold'},
-    {token: 'string', foreground: '1d5a8e'},
+    {token: 'string', foreground: '1d6b57'},
     {token: 'comment', foreground: 'a89f8e', fontStyle: 'italic'},
     {token: 'type', foreground: '8a6d1f'},
     {token: 'variable', foreground: '8a6d1f'},
@@ -60,7 +58,7 @@ monaco.editor.defineTheme('derivedoc-dark', {
   inherit: true,
   rules: [
     {token: 'keyword', foreground: 'e8896a', fontStyle: 'bold'},
-    {token: 'string', foreground: '7fb3d5'},
+    {token: 'string', foreground: '7cc0a4'},
     {token: 'comment', foreground: '77705f', fontStyle: 'italic'},
     {token: 'type', foreground: 'd6c07a'},
     {token: 'variable', foreground: 'd6c07a'},
@@ -219,80 +217,146 @@ export function MarkdownEditor({
   autoFocus?: boolean;
 }) {
   const theme = useTheme();
+  const host = useRef<HTMLDivElement>(null);
+  const editor = useRef<monaco.editor.IStandaloneCodeEditor>(undefined);
+  // 回调每次渲染都可能换新，用 ref 让编辑器始终调用最新那个。
+  const change = useRef(onChange);
+  const pick = useRef(onPick);
+  change.current = onChange;
+  pick.current = onPick;
 
-  return (
-    <div className="editor">
-      <Editor
-        language="markdown"
-        loading={
-          <div className="editor-loading">
-            <span>正在加载编辑器…</span>
-          </div>
-        }
-        onChange={next => onChange(next ?? '')}
-        onMount={editor => {
-          if (autoFocus) {
-            editor.focus();
-          }
+  useEffect(() => {
+    const container = host.current;
 
-          if (onPick) {
-            watchSelection(editor, onPick);
-          }
-        }}
-        options={EDITOR_OPTIONS}
-        theme={theme}
-        value={value}
-      />
-    </div>
-  );
+    if (!container) {
+      return;
+    }
+
+    const model = monaco.editor.createModel(value, 'markdown');
+    const instance = monaco.editor.create(container, {
+      ...EDITOR_OPTIONS,
+      automaticLayout: true,
+      model,
+      theme: currentTheme(),
+    });
+    const subscription = instance.onDidChangeModelContent(() =>
+      change.current(instance.getValue()),
+    );
+
+    editor.current = instance;
+    watchSelection(instance, next => pick.current?.(next));
+
+    return () => {
+      subscription.dispose();
+      instance.dispose();
+      model.dispose();
+      editor.current = undefined;
+    };
+  }, []);
+
+  // 外部换了内容（切文档、重新载入）时同步过去。
+  useEffect(() => {
+    const instance = editor.current;
+
+    if (instance && instance.getValue() !== value) {
+      instance.setValue(value);
+    }
+  }, [value]);
+
+  useEffect(() => {
+    monaco.editor.setTheme(theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (autoFocus) {
+      editor.current?.focus();
+    }
+  }, [autoFocus]);
+
+  return <div className="dd-editor" ref={host} />;
 }
 
 export function MarkdownDiff({
   original,
   modified,
-  originalLabel,
-  modifiedLabel,
   onPick,
+  onChange,
 }: {
   original: string;
   modified: string;
-  originalLabel?: string;
-  modifiedLabel?: string;
   onPick?: (pick: Pick | undefined) => void;
+  /** 给了回调就让右侧（工作区内容）可编辑，像编辑区一样改草稿。 */
+  onChange?: (value: string) => void;
 }) {
   const theme = useTheme();
+  const host = useRef<HTMLDivElement>(null);
+  const editor = useRef<monaco.editor.IStandaloneDiffEditor>(undefined);
+  const models = useRef<monaco.editor.ITextModel[]>([]);
+  const pick = useRef(onPick);
+  const change = useRef(onChange);
+  pick.current = onPick;
+  change.current = onChange;
 
-  return (
-    <div className="editor">
-      <DiffEditor
-        language="markdown"
-        loading={
-          <div className="editor-loading">
-            <span>正在加载编辑器…</span>
-          </div>
-        }
-        modified={modified}
-        onMount={editor => {
-          if (onPick) {
-            // 右侧是工作区内容，用户能选的就是它。
-            watchSelection(editor.getModifiedEditor(), onPick);
-          }
-        }}
-        options={{
-          ...EDITOR_OPTIONS,
-          readOnly: true,
-          renderSideBySide: true,
-          renderOverviewRuler: false,
-          originalEditable: false,
-        }}
-        original={original}
-        theme={theme}
-      />
-      {originalLabel && modifiedLabel && (
-        <p className="editor-caption">
-          {originalLabel} → {modifiedLabel}
-        </p>
-      )}
-    </div>
-  );
+  useEffect(() => {
+    const container = host.current;
+
+    if (!container) {
+      return;
+    }
+
+    const instance = monaco.editor.createDiffEditor(container, {
+      ...EDITOR_OPTIONS,
+      automaticLayout: true,
+      originalEditable: false,
+      readOnly: !change.current,
+      renderOverviewRuler: false,
+      renderSideBySide: true,
+      theme: currentTheme(),
+    });
+    const subscription = instance.getModifiedEditor().onDidChangeModelContent(() =>
+      change.current?.(instance.getModifiedEditor().getValue()),
+    );
+
+    editor.current = instance;
+    // 右侧是工作区内容，用户能选的就是它。
+    watchSelection(instance.getModifiedEditor(), next => pick.current?.(next));
+
+    return () => {
+      subscription.dispose();
+      instance.dispose();
+
+      for (const model of models.current) {
+        model.dispose();
+      }
+
+      models.current = [];
+      editor.current = undefined;
+    };
+  }, []);
+
+  // 两侧内容变了就换模型，旧的手动释放。
+  useEffect(() => {
+    const instance = editor.current;
+    const current = instance?.getModel();
+
+    // 自己敲出来的改动不要再回灌一遍模型，否则光标和撤销栈都会断。
+    if (!instance || (current?.original.getValue() === original && current.modified.getValue() === modified)) {
+      return;
+    }
+
+    const originalModel = monaco.editor.createModel(original, 'markdown');
+    const modifiedModel = monaco.editor.createModel(modified, 'markdown');
+    const previous = instance.getModel();
+
+    instance.setModel({original: originalModel, modified: modifiedModel});
+    previous?.original.dispose();
+    previous?.modified.dispose();
+    models.current = [originalModel, modifiedModel];
+  }, [original, modified]);
+
+  useEffect(() => {
+    monaco.editor.setTheme(theme);
+  }, [theme]);
+
+  return <div className="dd-editor" ref={host} />;
 }

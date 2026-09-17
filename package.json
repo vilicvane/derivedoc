@@ -29,7 +29,6 @@
   "dependencies": {
     "@hono/node-server": "^2.1.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@monaco-editor/react": "^4.7.0",
     "@types/markdown-it": "^14.2.0",
     "chokidar": "^5.0.0",
     "hono": "^4.13.8",

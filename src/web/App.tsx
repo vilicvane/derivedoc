@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Columns2,
   GitCommitHorizontal,
+  Minus,
   Plus,
   Quote,
   RotateCw,
@@ -28,17 +29,6 @@ import {resolveDocId} from '../core/links.ts';
 import {MarkdownDiff, MarkdownEditor, type Pick} from './editors.tsx';
 
 const markdown = new MarkdownIt({html: false, linkify: true});
-
-/** 文档目录相对项目根的形式；在根下就显示相对路径，否则给绝对路径。 */
-function relativeDocs(probe: {root: string; docs: string}): string {
-  if (probe.docs === probe.root) {
-    return '.';
-  }
-
-  return probe.docs.startsWith(`${probe.root}/`)
-    ? probe.docs.slice(probe.root.length + 1)
-    : probe.docs;
-}
 
 function draftMessage(changes: GitChange[]): string {
   if (changes.length === 0) {
@@ -83,6 +73,8 @@ interface Toast {
   id: number;
   kind: 'ok' | 'info' | 'warn' | 'error';
   text: string;
+  /** 同 key 的提示原地更新（比如「保存中…」变成「已保存」），不再叠一条。 */
+  key?: string;
 }
 
 interface ConversationRecord {
@@ -121,13 +113,14 @@ interface GitStatus {
   otherChanges: number;
 }
 
-/** `/api/resolve` 的回答：这条路径会是哪个工作区，文档目录在哪。 */
-interface WorkspaceProbe {
-  root: string;
-  docs: string;
-  exists: boolean;
-  recorded: boolean;
-  name: string;
+/** 工作区里还有没进暂存区的改动（含未跟踪）。 */
+function hasUnstaged(change: GitChange): boolean {
+  return change.worktree !== ' ' || change.index === '?';
+}
+
+/** 已经有内容在暂存区里。 */
+function isStaged(change: GitChange): boolean {
+  return change.index !== ' ' && change.index !== '?';
 }
 
 interface TreeNode {
@@ -183,7 +176,9 @@ function buildTree(docs: DocMeta[]): TreeNode[] {
         return layer;
       }
 
-      return a.name.localeCompare(b.name);
+      // 文件夹排在文件前面：先扫结构，再看具体是哪篇。
+      const folder = (a.doc ? 1 : 0) - (b.doc ? 1 : 0);
+      return folder !== 0 ? folder : a.name.localeCompare(b.name);
     });
 
   sortNodes(roots);
@@ -281,9 +276,6 @@ function Workspace() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState('');
   const [newDocs, setNewDocs] = useState('');
-  const [newDocsTouched, setNewDocsTouched] = useState(false);
-  const [probe, setProbe] = useState<WorkspaceProbe>();
-  const [probeError, setProbeError] = useState<string>();
   const [provenance, setProvenance] = useState<ConversationRecord[]>([]);
   const [showProvenance, setShowProvenance] = useState(false);
 
@@ -301,51 +293,6 @@ function Workspace() {
     window.addEventListener('keydown', close);
     return () => window.removeEventListener('keydown', close);
   }, [switcherOpen]);
-
-  // 界面里填路径时先问服务端一句：这是哪个工作区、文档目录会落在哪。
-  useEffect(() => {
-    const path = newWorkspace.trim();
-
-    if (!switcherOpen || !path) {
-      setProbe(undefined);
-      setProbeError(undefined);
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      void (async () => {
-        const query = new URLSearchParams({path});
-
-        if (newDocsTouched && newDocs.trim()) {
-          query.set('docs', newDocs.trim());
-        }
-
-        const response = await fetch(`/api/resolve?${query}`).catch(() => undefined);
-
-        if (!response?.ok) {
-          setProbe(undefined);
-          setProbeError(
-            response
-              ? (((await response.json().catch(() => undefined)) as {error?: {message?: string}})
-                  ?.error?.message ?? `认不出来（${response.status}）`)
-              : '服务没有响应',
-          );
-          return;
-        }
-
-        const payload = (await response.json()) as WorkspaceProbe;
-        setProbe(payload);
-        setProbeError(undefined);
-
-        // 用户没自己填文档目录时，把服务端认出来的那个填进去，省得猜。
-        if (!newDocsTouched) {
-          setNewDocs(relativeDocs(payload));
-        }
-      })();
-    }, 250);
-
-    return () => clearTimeout(timer);
-  }, [switcherOpen, newWorkspace, newDocs, newDocsTouched]);
 
   // 路由即状态：/d/<id> 看文档，?diff=1 看改动，/changes 看提交面板。
   const navigate = useNavigate();
@@ -438,9 +385,13 @@ function Workspace() {
   const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
   const focusEditorRef = useRef(false);
   const autoPickedRef = useRef(false);
+  /** 提示条的最新值与各自的定时器：同 key 就地更新，不叠两条。 */
+  const toastsRef = useRef<Toast[]>([]);
+  const timersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   stateRef.current = {doc, draft, selected};
+  toastsRef.current = toasts;
 
-  const notify = useCallback((text: string) => {
+  const notify = useCallback((text: string, key?: string) => {
     if (!text) {
       return;
     }
@@ -450,10 +401,28 @@ function Workspace() {
       : /已保存|已提交|已删除|已载入|生效/.test(text)
         ? 'ok'
         : 'info';
-    const id = Date.now() + Math.random();
+    const existing = key ? toastsRef.current.find(toast => toast.key === key) : undefined;
+    const id = existing?.id ?? Date.now() + Math.random();
 
-    setToasts(current => [...current.slice(-2), {id, kind, text}]);
-    setTimeout(() => setToasts(current => current.filter(toast => toast.id !== id)), 3200);
+    const next: Toast = {id, kind, text, ...(key ? {key} : {})};
+    setToasts(current => {
+      const rest = current.filter(toast => toast.id !== id);
+      return existing
+        ? current.map(toast => (toast.id === id ? next : toast))
+        : [...rest.slice(-2), next];
+    });
+
+    if (existing) {
+      clearTimeout(timersRef.current.get(id));
+    }
+
+    timersRef.current.set(
+      id,
+      setTimeout(() => {
+        timersRef.current.delete(id);
+        setToasts(current => current.filter(toast => toast.id !== id));
+      }, 3200),
+    );
   }, []);
 
   const setStatus = notify;
@@ -463,10 +432,24 @@ function Workspace() {
     [git],
   );
 
-  /** 已暂存的文件数：提交只带这些。 */
+  /** 当前这篇文档的 git 状态：用来决定「暂存 / 取消暂存」显示哪个。 */
+  const docChange = doc ? changeByPath.get(doc.relPath) : undefined;
+
+  /**
+   * 主界面的 diff 以暂存区为基准：这篇有暂存内容时是「与暂存区对比」，
+   * 没暂存过时基准就是 HEAD（暂存区与 HEAD 一致），所以直接说「与 HEAD 对比」。
+   */
+  const againstStaged = docChange !== undefined && isStaged(docChange);
+  const diffCaption = againstStaged ? '与暂存区对比' : '与 HEAD 对比';
+  const diffTitle = againstStaged ? '看与暂存区的对比' : '看与 HEAD 的对比';
+
+  /** 已暂存的文件数：提交时优先只带这些，没暂存过就整层提交。 */
   const stagedCount = (git?.changes ?? []).filter(
     change => change.index !== ' ' && change.index !== '?',
   ).length;
+
+  /** 这次提交会带上几篇：暂存过就按暂存的算，否则算上全部文档改动。 */
+  const commitCount = stagedCount > 0 ? stagedCount : (git?.changes.length ?? 0);
 
   /** 路由里的 id 不在文档列表里：多半是失效链接。 */
   const missingDoc = Boolean(selected) && docs.length > 0 && !docs.some(item => item.id === selected);
@@ -647,39 +630,29 @@ function Workspace() {
     };
   }, [selected]);
 
-  // 单个文档的 diff：以已提交版本为基准，对比当前编辑器内容。
-  useEffect(() => {
-    if (diffMode !== 'file' || !doc) {
+  /** 单个文档的 diff：以暂存区为基准，对比当前编辑器内容。 */
+  const loadFileDiff = useCallback(async () => {
+    if (!doc) {
       return;
     }
 
-    let cancelled = false;
+    const response = await fetch(`/api/git/show?${wsQuery({path: doc.relPath, base: 'index'})}`);
 
-    void (async () => {
-      const response = await fetch(
-        `/api/git/show?${wsQuery({path: doc.relPath, base: 'index'})}`,
-      );
+    if (!response.ok) {
+      setStatus(`读不到 ${doc.relPath} 的已提交版本`);
+      setFileDiff(undefined);
+      return;
+    }
 
-      if (!response.ok) {
-        if (!cancelled) {
-          setStatus(`读不到 ${doc.relPath} 的已提交版本`);
-          setFileDiff(undefined);
-        }
+    const payload = (await response.json()) as {original: string};
+    setFileDiff({original: payload.original, modified: stateRef.current.draft});
+  }, [doc, wsQuery]);
 
-        return;
-      }
-
-      const payload = (await response.json()) as {original: string};
-
-      if (!cancelled) {
-        setFileDiff({original: payload.original, modified: stateRef.current.draft});
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [diffMode, doc, loadGit]);
+  useEffect(() => {
+    if (diffMode === 'file') {
+      void loadFileDiff();
+    }
+  }, [diffMode, loadFileDiff]);
 
   useEffect(() => {
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -755,18 +728,25 @@ function Workspace() {
     }
   }, [gitOpen, gitFile, loadGitDiff, reviewBase]);
 
-  // 每次进审阅页默认选中第一个文件（只看一次），而不是让用户先面对一份混合 diff。
+  // 审阅页总是盯着一篇文档：没选或选中的文件已经不在改动里，就落到第一篇。
   useEffect(() => {
     if (!gitOpen) {
       autoPickedRef.current = false;
       return;
     }
 
-    if (!autoPickedRef.current && git && git.changes.length > 0) {
-      autoPickedRef.current = true;
-      setGitFile(git.changes[0]!.path);
+    const list = git?.changes ?? [];
+
+    if (list.length === 0) {
+      setGitFile(undefined);
+      return;
     }
-  }, [gitOpen, git]);
+
+    if (!autoPickedRef.current || !gitFile || !list.some(change => change.path === gitFile)) {
+      autoPickedRef.current = true;
+      setGitFile(list[0]!.path);
+    }
+  }, [gitFile, gitOpen, git]);
 
   const save = useCallback(async () => {
     const current = stateRef.current;
@@ -776,7 +756,7 @@ function Workspace() {
     }
 
     setBusy(true);
-    setStatus('保存中…');
+    setStatus('保存中…', 'save');
     pendingWriteRef.current = {id: current.doc.id, body: current.draft};
 
     const response = await fetch(`/api/doc?${wsQuery({id: current.doc.id})}`, {
@@ -790,12 +770,12 @@ function Workspace() {
 
     if (!response.ok) {
       pendingWriteRef.current = undefined;
-      setStatus(`保存失败：${payload.error?.message ?? response.status}`);
+      setStatus(`保存失败：${payload.error?.message ?? response.status}`, 'save');
       await loadDoc(current.doc.id);
       return;
     }
 
-    setStatus('已保存');
+    setStatus('已保存', 'save');
     await loadDoc(current.doc.id);
     await loadDocs();
     await loadBacklinks(current.doc.id);
@@ -906,16 +886,18 @@ function Workspace() {
 
   const createDoc = async (kind: DocKind) => {
     const base = creatingFolder ?? kind;
-    const id = newId.trim().replace(/\.md$/i, '');
-    const fullId = id.includes('/') ? id : `${base}/${id}`;
+    const typed = newId.trim().replace(/\.md$/i, '');
+    // 输入按入口算相对路径：在 source 下写「ui/button」就是 source/ui/button；
+    // 写成完整 id（source/… 或 derived/…）也可以，不会被再拼一层。
+    const id = /^(source|derived)\//.test(typed) ? typed : `${base}/${typed}`;
 
-    if (!id) {
+    if (!typed) {
       setStatus('先填一个 id');
       return;
     }
 
     setBusy(true);
-    const response = await fetch(`/api/doc?${wsQuery({id: fullId})}`, {
+    const response = await fetch(`/api/doc?${wsQuery({id})}`, {
       method: 'POST',
       headers: {'content-type': 'application/json'},
       body: JSON.stringify({content: `# ${id.split('/').pop()}\n\n`}),
@@ -926,7 +908,7 @@ function Workspace() {
       const payload = (await response.json()) as {error?: {message: string}};
       setStatus(
         response.status === 400 && /已存在/.test(payload.error?.message ?? '')
-          ? `已存在同名文档：${fullId}`
+          ? `已存在同名文档：${id}`
           : `创建失败：${payload.error?.message ?? response.status}`,
       );
       return;
@@ -939,7 +921,7 @@ function Workspace() {
       const next = new Set(current);
       let prefix = '';
 
-      for (const segment of fullId.split('/').slice(0, -1)) {
+      for (const segment of id.split('/').slice(0, -1)) {
         prefix = prefix ? `${prefix}/${segment}` : segment;
         next.delete(prefix);
       }
@@ -947,7 +929,7 @@ function Workspace() {
       return next;
     });
     focusEditorRef.current = true;
-    openDoc(fullId, {diff: false});
+    openDoc(id, {diff: false});
   };
 
   const removeDoc = async () => {
@@ -995,6 +977,11 @@ function Workspace() {
 
     setGit((await response.json()) as GitStatus);
     await loadGitDiff(gitFile);
+
+    // 文档页的 diff 以暂存区为基准，暂存之后它得跟着变。
+    if (diffMode === 'file') {
+      await loadFileDiff();
+    }
   };
 
   const commit = async () => {
@@ -1067,7 +1054,7 @@ function Workspace() {
         original: fileDiff.original,
         modified: fileDiff.modified,
         summary: summarizeDiff(lines),
-        caption: '与上次提交的版本对比',
+        caption: diffCaption,
       };
     }
 
@@ -1082,7 +1069,7 @@ function Workspace() {
       summary: summarizeDiff(lines),
       caption: '磁盘上的新版本与你的草稿的差异',
     };
-  }, [doc, draft, diffMode, incoming, fileDiff]);
+  }, [doc, draft, diffMode, incoming, fileDiff, diffCaption]);
 
   const openLink = (id: string) => {
     if (docs.some(item => item.id === id)) {
@@ -1154,12 +1141,21 @@ function Workspace() {
 
   const renderNode = (node: TreeNode) => {
     const isRoot = node.depth === 0;
-    const indent = {paddingLeft: `${0.35 + node.depth * 1.15}rem`};
+    /**
+     * 文件文字要和所属文件夹的标签对齐：标签前面有个箭头（0.45rem）加间隔（0.4rem），
+     * 再减掉文件行自己的 2px 左边框。根级文件因此对齐 SOURCE / DERIVED，嵌套的也一样对齐。
+     */
+    const folderIndent = (depth: number) => (depth === 0 ? 0.35 : 1.2 + (depth - 1) * 1.15);
+    const indent = {
+      // 文件夹行按层级缩进；文件行对齐所属文件夹的标签文字。
+      paddingLeft: node.doc
+        ? `calc(${folderIndent(node.depth - 1) + 0.85}rem - 2px)`
+        : `${folderIndent(node.depth)}rem`,
+    };
 
     if (!node.doc) {
       const open = !collapsed.has(node.path);
-      const label =
-        isRoot ? node.name.toUpperCase() : node.name;
+      const label = node.name;
 
       return (
         <li className={isRoot ? 'tree-root' : 'tree-folder'} key={node.path}>
@@ -1189,11 +1185,11 @@ function Workspace() {
                 event.preventDefault();
                 void createDoc(node.name as DocKind);
               }}
-              style={{paddingLeft: `${1.1 + node.depth * 1.15}rem`}}
+              style={{paddingLeft: `${node.depth === 0 ? 1.1 : 0.86 + node.depth * 1.15}rem`}}
             >
               <input
                 autoFocus
-                placeholder={`${node.path}/新文档`}
+                placeholder="文件名"
                 value={newId}
                 onChange={event => setNewId(event.target.value)}
                 onKeyDown={event => {
@@ -1269,23 +1265,6 @@ function Workspace() {
     }
 
     return `…/${tail}`;
-  };
-
-  /** 添加表单里的那行说明：还没填就说默认，填了就报认出来的结果。 */
-  const describeProbe = () => {
-    if (probeError) {
-      return probeError;
-    }
-
-    if (!probe) {
-      return `文档目录默认 ${DEFAULT_DOCS_DIR}/，粘项目根先认一下。`;
-    }
-
-    if (probe.exists) {
-      return `已有工作区「${probe.name}」${probe.recorded ? '，文档目录来自配置' : ''}`;
-    }
-
-    return `还没建过：会建 .derivedoc/ 与 ${relativeDocs(probe)}/`;
   };
 
   return (
@@ -1380,9 +1359,6 @@ function Workspace() {
 
                         setNewWorkspace('');
                         setNewDocs('');
-                        setNewDocsTouched(false);
-                        setProbe(undefined);
-                        setProbeError(undefined);
                         setSwitcherOpen(false);
                         await loadWorkspaces();
                         navigate(`/w/${payload.workspace.id}/`);
@@ -1390,26 +1366,22 @@ function Workspace() {
                     }}
                   >
                     <label className="add-row">
-                      <span className="add-label">项目根</span>
+                      <span className="add-label">项目目录</span>
                       <input
                         onChange={event => setNewWorkspace(event.target.value)}
-                        placeholder="~/projects/foo"
+                        placeholder="项目目录"
                         value={newWorkspace}
                       />
                     </label>
                     <label className="add-row">
                       <span className="add-label">文档目录</span>
                       <input
-                        onChange={event => {
-                          setNewDocs(event.target.value);
-                          setNewDocsTouched(true);
-                        }}
-                        placeholder={`${DEFAULT_DOCS_DIR}（默认）`}
+                        onChange={event => setNewDocs(event.target.value)}
+                        placeholder={DEFAULT_DOCS_DIR}
                         value={newDocs}
                       />
                     </label>
                     <div className="add-foot">
-                      <p className="add-note">{describeProbe()}</p>
                       <button aria-label="添加工作区" title="添加工作区" type="submit">
                         <Plus size={14} />
                         添加
@@ -1481,27 +1453,12 @@ function Workspace() {
               </div>
               <div className="actions">
                 {git && git.changes.length > 0 && (
-                  <div className="segmented" role="group" aria-label="diff 基准">
-                    <button
-                      className={reviewBase === 'head' ? 'on' : ''}
-                      onClick={() => setReviewBase('head')}
-                      title="与已提交版本比较"
-                      type="button"
-                    >
-                      与 HEAD
-                    </button>
-                    <button
-                      className={reviewBase === 'index' ? 'on' : ''}
-                      onClick={() => setReviewBase('index')}
-                      title="与暂存区比较"
-                      type="button"
-                    >
-                      与暂存区
-                    </button>
-                  </div>
-                )}
-                {git && git.changes.length > 0 && (
-                  <button onClick={() => void stage()} title="把两层文档的改动全部暂存" type="button">
+                  <button
+                    className="stage-button"
+                    onClick={() => void stage()}
+                    title="把两层文档的改动全部暂存"
+                    type="button"
+                  >
                     全部暂存
                   </button>
                 )}
@@ -1516,24 +1473,39 @@ function Workspace() {
               </div>
             </header>
             {!git?.available ? (
-              <p className="meta">{git?.reason ?? '拿不到 git 状态'}</p>
+              <p className="meta git-fallback">{git?.reason ?? '拿不到 git 状态'}</p>
             ) : (
               <>
                 <div className="git-body">
                   <ul className="git-files">
-                    <li>
-                      <button
-                        className={gitFile === undefined ? 'active' : ''}
-                        onClick={() => setGitFile(undefined)}
-                        type="button"
-                      >
-                        <span className="badge">全部</span>
-                        <span className="path">{git.changes.length} 个文件</span>
-                      </button>
+                    <li className="git-files-head">
+                      <span className="git-files-count">{git.changes.length} 个文件</span>
+                      <div className="segmented" role="group" aria-label="diff 基准">
+                        <button
+                          className={reviewBase === 'head' ? 'on' : ''}
+                          onClick={() => setReviewBase('head')}
+                          title="与已提交版本比较"
+                          type="button"
+                        >
+                          HEAD
+                        </button>
+                        <button
+                          className={reviewBase === 'index' ? 'on' : ''}
+                          onClick={() => setReviewBase('index')}
+                          title="与暂存区比较"
+                          type="button"
+                        >
+                          暂存区
+                        </button>
+                      </div>
                     </li>
                     {git.changes.map(change => (
                       <li key={change.path}>
-                        <div className={`git-row${gitFile === change.path ? ' active' : ''}`}>
+                        <div
+                          className={`git-row layer-${change.path.startsWith('source/') ? 'source' : 'derived'}${
+                            gitFile === change.path ? ' active' : ''
+                          }`}
+                        >
                           <button
                             className="git-pick"
                             onClick={() => setGitFile(change.path)}
@@ -1550,23 +1522,24 @@ function Workspace() {
                               </span>
                             )}
                           </button>
-                          {change.index !== ' ' && change.index !== '?' ? (
-                            <button
-                              className="git-stage"
-                              onClick={() => void stage(change.path, true)}
-                              title="取消暂存"
-                              type="button"
-                            >
-                              取消暂存
-                            </button>
-                          ) : (
+                          {hasUnstaged(change) && (
                             <button
                               className="git-stage"
                               onClick={() => void stage(change.path)}
                               title="暂存这个文件"
                               type="button"
                             >
-                              暂存
+                              <Plus size={12} />
+                            </button>
+                          )}
+                          {isStaged(change) && (
+                            <button
+                              className="git-stage"
+                              onClick={() => void stage(change.path, true)}
+                              title="取消暂存"
+                              type="button"
+                            >
+                              <Minus size={12} />
                             </button>
                           )}
                         </div>
@@ -1578,10 +1551,8 @@ function Workspace() {
                     {gitSides ? (
                       <MarkdownDiff
                         modified={gitSides.modified}
-                        modifiedLabel="工作区"
                         onPick={gitFile ? recordPick : undefined}
                         original={gitSides.original}
-                        originalLabel="已提交版本"
                       />
                     ) : (
                       <pre>
@@ -1605,12 +1576,16 @@ function Workspace() {
                   />
                   <button
                     className="primary"
-                    disabled={gitBusy || stagedCount === 0}
+                    disabled={gitBusy || commitCount === 0}
                     onClick={() => void commit()}
-                    title={stagedCount === 0 ? '先暂存要提交的改动' : '提交已暂存的内容'}
+                    title={
+                      stagedCount > 0
+                        ? `只提交已暂存的 ${stagedCount} 篇`
+                        : `把 ${commitCount} 篇文档的改动一起提交`
+                    }
                     type="button"
                   >
-                    {stagedCount === 0 ? '先暂存' : `提交 ${stagedCount} 个`}
+                    提交 {commitCount} 个
                   </button>
                 </div>
               </>
@@ -1643,26 +1618,40 @@ function Workspace() {
                 {(dirty || changeByPath.has(doc.relPath)) && (
                   <button
                     onClick={() => openDoc(doc.id, {diff: diffMode !== 'file'})}
-                    title={diffMode === 'file' ? '回到编辑' : '看相对上次提交的改动'}
+                    title={diffMode === 'file' ? '回到编辑' : diffTitle}
                     type="button"
                   >
                     <Columns2 size={14} />
-                    {diffMode === 'file' ? '编辑' : 'diff'}
+                    {diffMode === 'file' ? '编辑' : '对比'}
                   </button>
                 )}
                 <button onClick={() => void loadDoc(doc.id)} title="丢弃草稿并重新读取" type="button">
                   <RotateCw size={14} />
                   重新载入
                 </button>
-                <button
-                  className="danger"
-                  onClick={() => setConfirmingDelete(true)}
-                  title="删除这篇文档"
-                  type="button"
-                >
-                  <Trash2 size={14} />
-                  删除
-                </button>
+                {docChange && hasUnstaged(docChange) && (
+                  <button
+                    className="stage-button"
+                    disabled={gitBusy}
+                    onClick={() => void stage(doc.relPath)}
+                    title="把这篇的改动放进暂存区，之后在审阅页提交"
+                    type="button"
+                  >
+                    <Plus size={14} />
+                    暂存
+                  </button>
+                )}
+                {docChange && isStaged(docChange) && (
+                  <button
+                    disabled={gitBusy}
+                    onClick={() => void stage(doc.relPath, true)}
+                    title="把这篇从暂存区拿下来，改动留在工作区"
+                    type="button"
+                  >
+                    <Minus size={14} />
+                    取消暂存
+                  </button>
+                )}
                 <button
                   className="primary"
                   disabled={!dirty || busy}
@@ -1672,6 +1661,15 @@ function Workspace() {
                 >
                   <Check size={14} />
                   保存
+                </button>
+                <button
+                  className="danger"
+                  onClick={() => setConfirmingDelete(true)}
+                  title="删除这篇文档"
+                  type="button"
+                >
+                  <Trash2 size={14} />
+                  删除
                 </button>
               </div>
             </header>
@@ -1778,10 +1776,9 @@ function Workspace() {
                 </div>
                 <MarkdownDiff
                   modified={diff.modified}
+                  onChange={value => setDrafts(current => ({...current, [doc.id]: value}))}
                   onPick={recordPick}
                   original={diff.original}
-                  originalLabel="原内容"
-                  modifiedLabel="新内容"
                 />
               </section>
             ) : (
@@ -1831,13 +1828,11 @@ function Workspace() {
       <div className="toasts">
         {toasts.map(toast => (
           <div className={`toast ${toast.kind}`} key={toast.id}>
-            <span className="icon">
-              {toast.kind === 'ok' ? (
-                <Check size={13} />
-              ) : toast.kind === 'error' || toast.kind === 'warn' ? (
-                <AlertTriangle size={13} />
-              ) : null}
-            </span>
+            {toast.kind !== 'info' && (
+              <span className="icon">
+                {toast.kind === 'ok' ? <Check size={13} /> : <AlertTriangle size={13} />}
+              </span>
+            )}
             {toast.text}
           </div>
         ))}

@@ -1,5 +1,5 @@
 const BOOLEAN_FLAGS = new Set(['open', 'json', 'help', 'version', 'dev']);
-const VALUE_FLAGS = new Set(['port', 'host', 'kind', 'base-revision', 'content']);
+const VALUE_FLAGS = new Set(['port', 'host', 'kind', 'base-revision', 'content', 'doc-dir']);
 
 const SHORT_FLAGS = new Map<string, string>([
   ['-p', 'port'],

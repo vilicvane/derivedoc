@@ -15,9 +15,8 @@ import {
   gitStatus,
   gitUnstage,
 } from '../core/git.ts';
-import type {DocStore} from '../core/store.ts';
 import type {DocKind} from '../core/types.ts';
-import type {WorkspaceHub} from './hub.ts';
+import type {WorkspaceHub, WorkspaceView} from './hub.ts';
 
 /**
  * 前端产物位置。打包后 server 代码可能在 bld/cli/chunks 里，所以从当前文件往上找
@@ -87,18 +86,18 @@ export function createApp(hub: WorkspaceHub): Hono {
   /** 每次请求解析工作区：?ws=<id>，缺省用启动时的工作区。 */
   const withStore = async (
     c: Context,
-    handler: (store: DocStore) => Response | Promise<Response>,
+    handler: (view: WorkspaceView) => Response | Promise<Response>,
   ): Promise<Response> => {
     const id = c.req.query('ws') ?? hub.defaultId;
 
     try {
-      const store = await hub.get(id);
+      const view = await hub.get(id);
 
-      if (!store) {
+      if (!view) {
         return c.json({error: {code: 'not_found', message: `没有这个工作区：${id}`}}, 404);
       }
 
-      return await handler(store);
+      return await handler(view);
     } catch (error) {
       return errorResponse(error);
     }
@@ -121,28 +120,35 @@ export function createApp(hub: WorkspaceHub): Hono {
   });
 
   app.get('/api/health', c =>
-    withStore(c, store => c.json({ok: true, root: store.root, docs: store.list().length})),
+    withStore(c, view =>
+      c.json({
+        ok: true,
+        root: view.ref.root,
+        docs: view.ref.docs,
+        files: view.store.list().length,
+      }),
+    ),
   );
 
   app.get('/api/docs', c =>
-    withStore(c, store => {
+    withStore(c, view => {
       const kind = c.req.query('kind');
       return c.json({
-        docs: store.list(kind === 'source' || kind === 'derived' ? {kind: kind as DocKind} : {}),
+        docs: view.store.list(kind === 'source' || kind === 'derived' ? {kind: kind as DocKind} : {}),
       });
     }),
   );
 
   app.get('/api/search', c =>
-    withStore(c, store => c.json({hits: store.search(c.req.query('q') ?? '')})),
+    withStore(c, view => c.json({hits: view.store.search(c.req.query('q') ?? '')})),
   );
 
   /** 对话记录（本地缓存）：可按文档过滤，看某篇是谁在什么对话里定下来的。 */
   app.get('/api/conversations', c =>
-    withStore(c, async store => {
+    withStore(c, async view => {
       const doc = c.req.query('doc');
       const limit = Number(c.req.query('limit') ?? 200);
-      const all = await readConversations(store.root);
+      const all = await readConversations(view.ref.root);
       const filtered = doc
         ? all.filter(record => record.captures.some(capture => capture.changed.includes(doc)))
         : all;
@@ -151,13 +157,16 @@ export function createApp(hub: WorkspaceHub): Hono {
     }),
   );
 
-  app.get('/api/git/status', c => withStore(c, async store => c.json(await gitStatus(store.root))));
+  app.get('/api/git/status', c =>
+    withStore(c, async view => c.json(await gitStatus(view.ref.root, view.ref.docs))),
+  );
 
   app.get('/api/git/diff', c =>
-    withStore(c, async store =>
+    withStore(c, async view =>
       c.json({
         diff: await gitDiff(
-          store.root,
+          view.ref.root,
+          view.ref.docs,
           c.req.query('path'),
           c.req.query('base') === 'index' ? 'index' : 'head',
         ),
@@ -166,40 +175,40 @@ export function createApp(hub: WorkspaceHub): Hono {
   );
 
   app.post('/api/git/stage', c =>
-    withStore(c, async store => {
+    withStore(c, async view => {
       const body = (await c.req.json().catch(() => ({}))) as {path?: unknown; unstage?: unknown};
       const file = typeof body.path === 'string' ? body.path : undefined;
 
       if (body.unstage) {
-        await gitUnstage(store.root, file);
+        await gitUnstage(view.ref.root, view.ref.docs, file);
       } else {
-        await gitStage(store.root, file);
+        await gitStage(view.ref.root, view.ref.docs, file);
       }
 
-      return c.json(await gitStatus(store.root));
+      return c.json(await gitStatus(view.ref.root, view.ref.docs));
     }),
   );
 
   app.get('/api/git/show', c =>
-    withStore(c, async store => {
+    withStore(c, async view => {
       const file = c.req.query('path');
 
       if (!file) {
         return c.json({error: {code: 'invalid_id', message: '缺少 path'}}, 400);
       }
 
-      const rootPrefix = path.resolve(store.root) + path.sep;
-      const absolute = path.resolve(store.root, file);
+      const rootPrefix = path.resolve(view.ref.docs) + path.sep;
+      const absolute = path.resolve(view.ref.docs, file);
 
       if (!absolute.startsWith(rootPrefix)) {
-        return c.json({error: {code: 'invalid_id', message: 'path 越出工作区'}}, 400);
+        return c.json({error: {code: 'invalid_id', message: 'path 越出文档目录'}}, 400);
       }
 
       const modified = await fsp.readFile(absolute, 'utf8').catch(() => '');
       const original =
         c.req.query('base') === 'index'
-          ? await gitShowStaged(store.root, file)
-          : await gitShow(store.root, file);
+          ? await gitShowStaged(view.ref.root, view.ref.docs, file)
+          : await gitShow(view.ref.root, view.ref.docs, file);
 
       if (!modified && !original) {
         return c.json({error: {code: 'not_found', message: `文件不存在：${file}`}}, 404);
@@ -210,27 +219,27 @@ export function createApp(hub: WorkspaceHub): Hono {
   );
 
   app.post('/api/git/commit', c =>
-    withStore(c, async store => {
+    withStore(c, async view => {
       const body = (await c.req.json().catch(() => ({}))) as {message?: unknown};
-      const status = await gitStatus(store.root);
+      const status = await gitStatus(view.ref.root, view.ref.docs);
       const message =
         typeof body.message === 'string' && body.message.trim()
           ? body.message
           : (status.message ?? '');
-      const result = await gitCommit(store.root, message);
+      const result = await gitCommit(view.ref.root, view.ref.docs, message);
       return result.ok ? c.json(result) : c.json(result, 400);
     }),
   );
 
   app.get('/api/doc', c =>
-    withStore(c, store => {
+    withStore(c, view => {
       const id = c.req.query('id');
 
       if (!id) {
         return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
       }
 
-      const doc = store.read(id);
+      const doc = view.store.read(id);
       return c.json({
         id: doc.id,
         kind: doc.kind,
@@ -246,19 +255,19 @@ export function createApp(hub: WorkspaceHub): Hono {
   );
 
   app.get('/api/backlinks', c =>
-    withStore(c, store => {
+    withStore(c, view => {
       const id = c.req.query('id');
 
       if (!id) {
         return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
       }
 
-      return c.json({docs: store.backlinks(id)});
+      return c.json({docs: view.store.backlinks(id)});
     }),
   );
 
   const write = (createOnly: boolean) => async (c: Context) =>
-    withStore(c, async store => {
+    withStore(c, async view => {
       const id = c.req.query('id');
 
       if (!id) {
@@ -277,7 +286,7 @@ export function createApp(hub: WorkspaceHub): Hono {
         return c.json({error: {code: 'invalid_content', message: '缺少 content'}}, 400);
       }
 
-      const doc = await store.write(id, payload.content, {
+      const doc = await view.store.write(id, payload.content, {
         ...(createOnly ? {createOnly: true} : {}),
         ...(typeof payload.baseRevision === 'string'
           ? {baseRevision: payload.baseRevision}
@@ -290,14 +299,14 @@ export function createApp(hub: WorkspaceHub): Hono {
   app.post('/api/doc', write(true));
 
   app.delete('/api/doc', c =>
-    withStore(c, async store => {
+    withStore(c, async view => {
       const id = c.req.query('id');
 
       if (!id) {
         return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
       }
 
-      await store.remove(id);
+      await view.store.remove(id);
       return c.json({ok: true});
     }),
   );

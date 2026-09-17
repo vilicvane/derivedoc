@@ -1,7 +1,15 @@
 import process from 'node:process';
+import path from 'node:path';
 
 import {DocStoreError, isDocStoreError} from '../core/errors.ts';
-import {findProjectRoot, initProject} from '../core/project.ts';
+import {
+  createWorkspace,
+  findProjectRoot,
+  initProject,
+  resolveWorkspace,
+  writeDocsDir,
+  type WorkspacePaths,
+} from '../core/project.ts';
 import {DocStore} from '../core/store.ts';
 import type {DocKind} from '../core/types.ts';
 import {CliError} from './args.ts';
@@ -13,44 +21,139 @@ export interface CommandOptions {
   content?: string;
 }
 
+/** 子命令名。第一位 positional 命中这些名字时按「在 cwd 里跑子命令」解释。 */
+export const COMMANDS = new Set(['root', 'ls', 'read', 'stat', 'write', 'append', 'rm']);
+
 /** agent 与人都用这几个子命令读写文档，服务不必启动。 */
 export async function runCommand(
-  dir: string,
+  projectDir: string,
+  docDir: string | undefined,
   command: string,
   rest: string[],
   options: CommandOptions,
 ): Promise<void> {
   switch (command) {
     case 'root':
-      return printProjectRoot(dir, options);
+      return printProjectRoot(projectDir, docDir, options);
     case 'ls':
-      return listDocs(dir, options);
+      return listDocs(projectDir, docDir, options);
     case 'read':
-      return printDocBody(dir, takeId(rest, 'read').id, options);
+      return printDocBody(projectDir, docDir, takeId(rest, 'read').id, options);
     case 'stat':
-      return printDocMeta(dir, takeId(rest, 'stat').id, options);
+      return printDocMeta(projectDir, docDir, takeId(rest, 'stat').id, options);
     case 'write':
-      return writeDoc(dir, takeId(rest, 'write'), options);
+      return writeDoc(projectDir, docDir, takeId(rest, 'write'), options);
     case 'append':
-      return appendDoc(dir, takeId(rest, 'append'), options);
+      return appendDoc(projectDir, docDir, takeId(rest, 'append'), options);
     case 'rm':
-      return removeDoc(dir, takeId(rest, 'rm').id, options);
+      return removeDoc(projectDir, docDir, takeId(rest, 'rm').id, options);
     default:
       throw new CliError(
-        `未知子命令：${command}（可用：root、ls、read、stat、write、append、rm；省略子命令则启动服务）`,
+        `未知子命令：${command}（可用：${[...COMMANDS].join('、')}；省略子命令则启动服务）`,
       );
   }
 }
 
-/** 判断目录属于哪个 derivedoc 工作区；不属于则退出码 1。 */
-async function printProjectRoot(dir: string, options: CommandOptions): Promise<void> {
-  const root = await findProjectRoot(dir);
+/** 目录不构成工作区时怎么救：是上层项目的一部分，还是从头建。 */
+export async function missingWorkspaceHint(projectDir: string, cwd: string): Promise<string> {
+  const root = path.resolve(cwd, projectDir);
+  const parent = await findProjectRoot(path.dirname(root));
+  const projectArg = path.relative(cwd, root);
+  const prefix = projectArg ? `dd ${projectArg}` : 'dd';
 
-  if (!root) {
+  if (parent) {
+    const docs = path.relative(parent, root) || '.';
+
+    return [
+      `${root} 里没有 .derivedoc/：它属于上层项目 ${parent}。`,
+      `  用那个项目：dd ${path.relative(cwd, parent) || '.'} --doc-dir=${docs}`,
+    ].join('\n');
+  }
+
+  return [
+    `${root} 还不是 derivedoc 工作区：第一次创建要指明文档目录，例如`,
+    `  ${prefix} --doc-dir=prd     # 项目根是${projectArg ? ` ${projectArg}` : '当前目录'}，文档放 prd/`,
+    `  ${prefix} --doc-dir=.       # 文档就放项目根`,
+  ].join('\n');
+}
+
+/** 打开文档目录；不在工作区里就报错——子命令不会顺手建工作区。 */
+async function openDocs(projectDir: string, docDir: string | undefined): Promise<DocStore> {
+  const workspace = await commandWorkspace(projectDir, docDir);
+
+  if (!workspace) {
+    throw new CliError(await readOnlyHint(projectDir, docDir));
+  }
+
+  return DocStore.open(workspace.docs, {watch: false});
+}
+
+/**
+ * 写入前的工作区：已有就补齐目录；没有就用给的文档目录建一个。
+ */
+async function prepareWorkspace(
+  projectDir: string,
+  docDir: string | undefined,
+): Promise<WorkspacePaths> {
+  const existing = await commandWorkspace(projectDir, docDir);
+
+  if (existing) {
+    await initProject(existing.root, existing.docs);
+    return existing;
+  }
+
+  if (!docDir) {
+    throw new CliError(await readOnlyHint(projectDir, docDir));
+  }
+
+  const created = await createWorkspace(projectDir, docDir);
+  return {root: created.root, docs: created.docs};
+}
+
+/** 只读子命令碰不到工作区时：带 --doc-dir 说明用户是想建，只是这个子命令不建。 */
+async function readOnlyHint(projectDir: string, docDir: string | undefined): Promise<string> {
+  if (!docDir) {
+    return missingWorkspaceHint(projectDir, process.cwd());
+  }
+
+  const cwd = process.cwd();
+  const root = path.resolve(cwd, projectDir);
+  const projectArg = path.relative(cwd, root);
+  const prefix = projectArg ? `dd ${projectArg}` : 'dd';
+
+  return [
+    `${root} 里还没有 .derivedoc/：这个子命令只读已有工作区，不会顺手建。`,
+    `  要建就跑 ${prefix} --doc-dir=${docDir}（不带子命令，会起服务）`,
+  ].join('\n');
+}
+
+/** 子命令用的工作区：显式给了文档目录就记进项目配置，之后的调用不用再给。 */
+async function commandWorkspace(
+  projectDir: string,
+  docDir: string | undefined,
+): Promise<WorkspacePaths | undefined> {
+  const workspace = await resolveWorkspace(projectDir, docDir);
+
+  if (workspace && docDir) {
+    await writeDocsDir(workspace.root, workspace.docs);
+  }
+
+  return workspace;
+}
+
+/** 判断目录属于哪个 derivedoc 工作区；不属于则退出码 1。 */
+async function printProjectRoot(
+  projectDir: string,
+  docDir: string | undefined,
+  options: CommandOptions,
+): Promise<void> {
+  const workspace = await commandWorkspace(projectDir, docDir);
+
+  if (!workspace) {
     if (options.json) {
-      printJson({root: null});
+      printJson({root: null, docs: null});
     } else {
-      process.stderr.write(`${dir} 不在 derivedoc 工作区\n`);
+      process.stderr.write(`${await missingWorkspaceHint(projectDir, process.cwd())}\n`);
     }
 
     process.exitCode = 1;
@@ -58,15 +161,19 @@ async function printProjectRoot(dir: string, options: CommandOptions): Promise<v
   }
 
   if (options.json) {
-    printJson({root});
+    printJson({root: workspace.root, docs: workspace.docs});
     return;
   }
 
-  process.stdout.write(`${root}\n`);
+  process.stdout.write(`${workspace.root}\n`);
 }
 
-async function listDocs(dir: string, options: CommandOptions): Promise<void> {
-  const store = await DocStore.open(dir, {watch: false});
+async function listDocs(
+  projectDir: string,
+  docDir: string | undefined,
+  options: CommandOptions,
+): Promise<void> {
+  const store = await openDocs(projectDir, docDir);
 
   try {
     const docs = store.list(parseKind(options.kind));
@@ -86,8 +193,13 @@ async function listDocs(dir: string, options: CommandOptions): Promise<void> {
   }
 }
 
-async function printDocBody(dir: string, id: string, options: CommandOptions): Promise<void> {
-  const store = await DocStore.open(dir, {watch: false});
+async function printDocBody(
+  projectDir: string,
+  docDir: string | undefined,
+  id: string,
+  options: CommandOptions,
+): Promise<void> {
+  const store = await openDocs(projectDir, docDir);
 
   try {
     const doc = store.read(id);
@@ -111,8 +223,13 @@ async function printDocBody(dir: string, id: string, options: CommandOptions): P
   }
 }
 
-async function printDocMeta(dir: string, id: string, options: CommandOptions): Promise<void> {
-  const store = await DocStore.open(dir, {watch: false});
+async function printDocMeta(
+  projectDir: string,
+  docDir: string | undefined,
+  id: string,
+  options: CommandOptions,
+): Promise<void> {
+  const store = await openDocs(projectDir, docDir);
 
   try {
     const doc = store.read(id);
@@ -130,12 +247,13 @@ async function printDocMeta(dir: string, id: string, options: CommandOptions): P
 }
 
 async function writeDoc(
-  dir: string,
+  projectDir: string,
+  docDir: string | undefined,
   target: {id: string; inline: string},
   options: CommandOptions,
 ): Promise<void> {
-  await initProject(dir);
-  const store = await DocStore.open(dir, {watch: false});
+  const workspace = await prepareWorkspace(projectDir, docDir);
+  const store = await DocStore.open(workspace.docs, {watch: false});
 
   try {
     const id = target.id;
@@ -151,12 +269,13 @@ async function writeDoc(
 }
 
 async function appendDoc(
-  dir: string,
+  projectDir: string,
+  docDir: string | undefined,
   target: {id: string; inline: string},
   options: CommandOptions,
 ): Promise<void> {
-  await initProject(dir);
-  const store = await DocStore.open(dir, {watch: false});
+  const workspace = await prepareWorkspace(projectDir, docDir);
+  const store = await DocStore.open(workspace.docs, {watch: false});
 
   try {
     const id = target.id;
@@ -168,8 +287,13 @@ async function appendDoc(
   }
 }
 
-async function removeDoc(dir: string, id: string, options: CommandOptions): Promise<void> {
-  const store = await DocStore.open(dir, {watch: false});
+async function removeDoc(
+  projectDir: string,
+  docDir: string | undefined,
+  id: string,
+  options: CommandOptions,
+): Promise<void> {
+  const store = await openDocs(projectDir, docDir);
 
   try {
     await store.remove(

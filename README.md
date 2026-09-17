@@ -10,24 +10,25 @@
 
 ```sh
 npm install
-npm run dd -- ./prd        # 初始化目录、起服务，打印 web 地址与 MCP 接入方式
+npm run dd                # 在项目里起服务，打印 web 地址与 MCP 接入方式
 ```
 
 服务不是必须的。文档读写直接走 CLI 就行，只有需要界面或 MCP 时才起服务：
 
 ```sh
-dd ./prd ls [--kind source|derived] [--json]   # 列出文档
-dd ./prd read <id> [--json]                    # 打印正文
-dd ./prd stat <id>                             # 只打印修订号
-dd ./prd write <id> [--base-revision <rev>]    # 整篇写入，内容从 stdin / --content / 参数读
-dd ./prd append <id> '## 决定：xxx'             # 追加到文末
-dd ./prd rm <id>
+dd --doc-dir=prd                               # 第一次：建工作区，项目根是当前目录，文档放 prd/
+dd ls [--kind source|derived] [--json]         # 列出文档
+dd read <id> [--json]                          # 打印正文
+dd stat <id>                                   # 只打印修订号
+dd write <id> [--base-revision <rev>]          # 整篇写入，内容从 stdin / --content / 参数读
+dd append <id> '## 决定：xxx'                   # 追加到文末
+dd rm <id>
 ```
 
 ```sh
-dd ./prd append source/requirements '## 决定：先用 CLI 接入'
-rev=$(dd ./prd stat derived/storage)
-dd ./prd write derived/storage --base-revision "$rev" < storage.md
+dd append source/requirements '## 决定：先用 CLI 接入'
+rev=$(dd stat derived/storage)
+dd write derived/storage --base-revision "$rev" < storage.md
 ```
 
 服务提供三样东西：
@@ -45,14 +46,20 @@ codex mcp add derivedoc --url http://127.0.0.1:7788/mcp
 ## 目录结构
 
 ```text
-prd/
+.derivedoc/      本地数据：对话记录、待审阅改动、记下的文档目录
+prd/             文档目录（创建时指定，默认就是项目根）
   source/        人提出的需求与讨论后定下的决定
   derived/       agent 据此维护的设计方案
-  .derivedoc/    本地数据（暂未使用）
 ```
 
-文档 id 是相对路径去掉 `.md`，例如 `source/requirements`。写入可以带 `base_revision`
-做并发校验，不匹配会返回 `conflict`。
+工作区分两处：**项目根**（`.derivedoc/` 所在，也是 git 作用域）和**文档目录**
+（`source/` 与 `derived/` 所在）。位置参数是项目根（默认当前目录），文档目录走
+`--doc-dir`：`dd --doc-dir=prd` 会把当前目录当项目根、把 `prd/` 当文档目录记进
+`.derivedoc/config.json`，之后 `dd` 不带它也能找到。项目根要显式指定时写
+`dd ./app --doc-dir=.`。
+
+文档 id 相对文档目录，是路径去掉 `.md`，例如 `source/requirements`。写入可以带
+`base_revision` 做并发校验，不匹配会返回 `conflict`。
 
 ## 开发
 

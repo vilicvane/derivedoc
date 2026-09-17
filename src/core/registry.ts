@@ -3,13 +3,20 @@ import os from 'node:os';
 import path from 'node:path';
 
 export interface WorkspaceEntry {
-  /** 工作区根目录的绝对路径 */
+  /** 项目根目录的绝对路径（`.derivedoc/` 所在） */
   root: string;
+  /** 文档目录的绝对路径；缺省表示文档目录就是项目根（早期布局） */
+  docs?: string;
   /** 最近一次打开时间（ISO） */
   lastOpened: string;
 }
 
-export interface WorkspaceRef extends WorkspaceEntry {
+export interface WorkspaceRef {
+  /** 项目根目录的绝对路径 */
+  root: string;
+  /** 文档目录的绝对路径 */
+  docs: string;
+  lastOpened: string;
   /** 稳定的短 id，用于 URL */
   id: string;
   name: string;
@@ -34,10 +41,14 @@ export function workspaceId(root: string): string {
 }
 
 export function toRef(entry: WorkspaceEntry): WorkspaceRef {
+  const root = path.resolve(entry.root);
+
   return {
-    ...entry,
-    id: workspaceId(entry.root),
-    name: path.basename(entry.root) || entry.root,
+    root,
+    docs: path.resolve(root, entry.docs ?? '.'),
+    lastOpened: entry.lastOpened,
+    id: workspaceId(root),
+    name: path.basename(root) || root,
   };
 }
 
@@ -66,14 +77,19 @@ export async function listWorkspaces(): Promise<WorkspaceRef[]> {
     .map(toRef);
 }
 
-export async function registerWorkspace(root: string): Promise<WorkspaceRef> {
-  const resolved = path.resolve(root);
+export async function registerWorkspace(paths: {root: string; docs: string}): Promise<WorkspaceRef> {
+  const resolved = path.resolve(paths.root);
+  const docs = path.resolve(paths.docs);
   const entries = await listWorkspaces();
   const next: WorkspaceEntry[] = [
-    {root: resolved, lastOpened: new Date().toISOString()},
+    {root: resolved, docs, lastOpened: new Date().toISOString()},
     ...entries
       .filter(entry => entry.root !== resolved)
-      .map(({root: entryRoot, lastOpened}) => ({root: entryRoot, lastOpened})),
+      .map(({root: entryRoot, docs: entryDocs, lastOpened}) => ({
+        root: entryRoot,
+        docs: entryDocs,
+        lastOpened,
+      })),
   ].slice(0, 30);
 
   const file = registryFile();

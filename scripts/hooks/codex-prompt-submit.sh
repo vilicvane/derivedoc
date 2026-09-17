@@ -26,5 +26,5 @@ while [ "$dir" != / ]; do
   dir=$(dirname "$dir")
 done
 
-# 往上找不到：可能工作区在当前目录下面（比如仓库根下的 prd/），交给 node 查注册表。
+# 往上找不到：可能项目在当前目录下面（当前目录是它的父级），交给 node 查注册表。
 printf '%s' "$payload" | DERIVEDOC_CAPTURE=1 exec node "$(dirname "$0")/capture.mjs" ""

@@ -5,13 +5,17 @@
 ## 目录结构
 
 ```text
-<项目>/
-  source/        决定
-  derived/       方案
+<项目根>/
   .derivedoc/    本地运行数据
     conversations/
       <session-id>.jsonl  对话日志；每个会话一份，只追加不改写；供 source 决定追溯发言者与时间
+    config.json          这个项目的文档目录（例如 "prd"）
+  <文档目录>/    默认就是项目根，也可以是 prd/ 这样的子目录
+    source/      决定
+    derived/     方案
 ```
+
+项目根与文档目录是两件事：前者归运行数据与 git，后者归两层文档。文档 id 相对文档目录。
 
 ## 标识与标题
 
@@ -46,5 +50,5 @@
 
 ## 初始化行为
 
-`dd <目录>` 只会在项目首次建立时补一篇占位 `source/requirements.md`；用户删掉之后不会
-自动补回来。
+`dd --doc-dir=prd` 只会在项目首次建立时补一篇占位 `source/requirements.md`；用户删掉之后
+不会自动补回来。建的时候把项目根与文档目录都写清楚，文档目录记进 `.derivedoc/config.json`。

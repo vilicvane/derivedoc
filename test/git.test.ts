@@ -48,7 +48,7 @@ test('非仓库目录会明确报告不可用', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'derivedoc-nogit-'));
   await initProject(dir);
 
-  const status = await gitStatus(dir);
+  const status = await gitStatus(dir, dir);
   assert.equal(status.available, false);
   assert.match(status.reason ?? '', /不在 git 仓库/);
 });
@@ -59,32 +59,32 @@ test('改动后能拿到 diff，提交后工作区干净', async () => {
 
   try {
     await store.write('source/decisions', '# 决定\n\n第一条决定。\n');
-    const status = await gitStatus(dir);
+    const status = await gitStatus(dir, dir);
     assert.equal(status.available, true);
     assert.deepEqual(
       status.changes.map(change => change.path),
       ['source/decisions.md'],
     );
 
-    const diff = await gitDiff(dir);
+    const diff = await gitDiff(dir, dir);
     assert.match(diff, /\+第一条决定。/);
 
-    const single = await gitDiff(dir, 'source/decisions.md');
+    const single = await gitDiff(dir, dir, 'source/decisions.md');
     assert.match(single, /\+第一条决定。/);
 
     await writeMessage(dir, '记录第一条决定');
-    const message = (await gitStatus(dir)).message ?? '';
+    const message = (await gitStatus(dir, dir)).message ?? '';
     assert.equal(message.trim(), '记录第一条决定');
 
     // 先暂存再提交：提交只带已暂存的内容。
-    await gitStage(dir, 'source/decisions.md');
-    assert.match(await gitShowStaged(dir, 'source/decisions.md'), /第一条决定/);
+    await gitStage(dir, dir, 'source/decisions.md');
+    assert.match(await gitShowStaged(dir, dir, 'source/decisions.md'), /第一条决定/);
 
-    const committed = await gitCommit(dir, message);
+    const committed = await gitCommit(dir, dir, message);
     assert.equal(committed.ok, true);
     assert.ok(committed.sha);
 
-    const after = await gitStatus(dir);
+    const after = await gitStatus(dir, dir);
     assert.deepEqual(after.changes, []);
     assert.equal(after.message, '');
 
@@ -106,8 +106,8 @@ test('提交只带上两层文档，不动其它暂存内容', async () => {
 
   try {
     await store.write('source/decisions', '# 决定\n\n只提交文档。\n');
-    await gitStage(dir);
-    const result = await gitCommit(dir, '只提交文档');
+    await gitStage(dir, dir);
+    const result = await gitCommit(dir, dir, '只提交文档');
     assert.equal(result.ok, true);
 
     const staged = await git('diff', '--cached', '--name-only');
@@ -119,7 +119,7 @@ test('提交只带上两层文档，不动其它暂存内容', async () => {
 
 test('空 message 拒绝提交', async () => {
   const dir = await createRepo();
-  const result = await gitCommit(dir, '   ');
+  const result = await gitCommit(dir, dir, '   ');
   assert.equal(result.ok, false);
   assert.match(result.error ?? '', /空的/);
 });
@@ -131,21 +131,21 @@ test('没暂存就不提交；暂存后可以取消暂存', async () => {
   try {
     await store.write('source/decisions', '# 决定\n\n还没暂存。\n');
 
-    const refused = await gitCommit(dir, '未暂存');
+    const refused = await gitCommit(dir, dir, '未暂存');
     assert.equal(refused.ok, false);
     assert.match(refused.error ?? '', /暂存/);
 
-    await gitStage(dir);
+    await gitStage(dir, dir);
     assert.deepEqual(
-      (await gitStatus(dir)).changes.map(change => change.index),
+      (await gitStatus(dir, dir)).changes.map(change => change.index),
       ['A'],
     );
-    assert.match(await gitShowStaged(dir, 'source/decisions.md'), /还没暂存/);
+    assert.match(await gitShowStaged(dir, dir, 'source/decisions.md'), /还没暂存/);
 
-    await gitUnstage(dir);
-    assert.equal(await gitShowStaged(dir, 'source/decisions.md'), '');
+    await gitUnstage(dir, dir);
+    assert.equal(await gitShowStaged(dir, dir, 'source/decisions.md'), '');
     assert.deepEqual(
-      (await gitStatus(dir)).changes.map(change => change.path),
+      (await gitStatus(dir, dir)).changes.map(change => change.path),
       ['source/decisions.md'],
     );
   } finally {
@@ -163,15 +163,59 @@ test('还没有任何提交时也能看 diff', async () => {
   try {
     await store.write('source/decisions', '# 决定\n\n还没有提交过。\n');
 
-    const status = await gitStatus(dir);
+    const status = await gitStatus(dir, dir);
     assert.equal(status.available, true);
     assert.equal(status.branch, undefined);
     assert.ok(status.changes.some(change => change.path === 'source/decisions.md'));
 
-    const diff = await gitDiff(dir);
+    const diff = await gitDiff(dir, dir);
     assert.match(diff, /\+还没有提交过。/);
 
-    assert.equal(await gitShow(dir, 'source/decisions.md'), '');
+    assert.equal(await gitShow(dir, dir, 'source/decisions.md'), '');
+  } finally {
+    await store.close();
+  }
+});
+
+// 这两处参数在单目录布局里相同，写两遍是故意的：文档目录和项目根现在是两件事。
+test('文档目录不在项目根时，路径与作用域都按文档目录算', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'derivedoc-split-'));
+  const docs = path.join(root, 'prd');
+  const git = (...args: string[]) => exec('git', ['-C', root, ...args], {encoding: 'utf8'});
+
+  await git('init', '-q');
+  await git('config', 'user.email', 'test@example.com');
+  await git('config', 'user.name', 'Test');
+  await initProject(root, docs);
+  await git('add', '--', '.');
+  await git('commit', '-q', '-m', 'init');
+
+  const store = await DocStore.open(docs, {watch: false});
+
+  try {
+    await store.write('derived/plan', '# 方案\n\n写在 prd/ 下。\n');
+    // 项目根里的代码改动不该算进文档变更。
+    await fs.writeFile(path.join(root, 'main.ts'), 'export const x = 1;\n');
+
+    const status = await gitStatus(root, docs);
+    assert.equal(status.available, true);
+    assert.deepEqual(
+      status.changes.map(change => change.path),
+      ['derived/plan.md'],
+    );
+    assert.equal(status.otherChanges, 1);
+
+    const diff = await gitDiff(root, docs, 'derived/plan.md');
+    assert.match(diff, /\+写在 prd\/ 下。/);
+
+    await gitStage(root, docs, 'derived/plan.md');
+    assert.match(await gitShowStaged(root, docs, 'derived/plan.md'), /写在 prd\/ 下。/);
+
+    const committed = await gitCommit(root, docs, '记录方案');
+    assert.equal(committed.ok, true);
+    assert.equal((await gitStatus(root, docs)).changes.length, 0);
+    // 两层文档之外的改动仍然挂着，没被顺手提交。
+    assert.match((await git('status', '--porcelain')).stdout, /\?\? main\.ts/);
   } finally {
     await store.close();
   }

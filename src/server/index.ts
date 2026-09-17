@@ -48,16 +48,16 @@ export async function startServer(
     }
 
     const wsId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('ws') ?? hub.defaultId;
-    const store = await hub.get(wsId);
+    const view = await hub.get(wsId);
 
-    if (!store) {
+    if (!view) {
       res.writeHead(404, {'content-type': 'application/json'}).end(
         JSON.stringify({jsonrpc: '2.0', error: {code: -32602, message: `没有这个工作区：${wsId}`}, id: null}),
       );
       return;
     }
 
-    const server = createMcpServer(store);
+    const server = createMcpServer(view.store);
     const transport = new StreamableHTTPServerTransport({sessionIdGenerator: undefined});
 
     res.on('close', () => {

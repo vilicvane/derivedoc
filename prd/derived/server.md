@@ -5,8 +5,8 @@
 命令行输出与界面文案统一用「工作区」指代一个被 `dd` 管理的目录——这是实现时的取名，
 不是产品决定。
 
-`dd <目录>` 会初始化目录、启动本地服务并打印地址。默认监听 `127.0.0.1:7788`，端口被占用
-时自动顺延（最多 10 个）。
+`dd` 会初始化工作区、启动本地服务并打印地址（项目根与文档目录分两行）。默认监听
+`127.0.0.1:7788`，端口被占用时自动顺延（最多 10 个）。
 
 加 `--dev` 进入开发模式：服务启动时顺带跑 Vite 的 watch 构建，每次构建完成通过已有的
 WebSocket 通知页面自己刷新，省掉手动刷新。之所以不用 Vite dev server 直接托管前端——
@@ -18,7 +18,7 @@ Monaco 会让 dev server 反复重做依赖优化并整页刷新（实测一次�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/health` | `{ok, root, docs}` |
+| GET | `/api/health` | `{ok, root, docs, files}`：项目根、文档目录、文档篇数 |
 | GET | `/api/docs?kind=` | 文档列表（元数据） |
 | GET | `/api/doc?id=` | 单篇正文，含 `revision` 与 `frontmatter` |
 | GET | `/api/search?q=` | 标题与正文全文检索，命中带 `snippet` |
@@ -30,12 +30,14 @@ Monaco 会让 dev server 反复重做依赖优化并整页刷新（实测一次�
 
 ## 变更推送
 
-`/ws` 是 WebSocket，连接后先收到 `{type:"ready", root}`，之后收到
+`/ws` 是 WebSocket，连接后先收到 `{type:"ready", defaultId}`，之后收到
 `{type:"created"|"changed"|"deleted", id, kind, revision, updatedAt}`。
 
 ## 文档改动与提交
 
-改动以 git 为准，范围固定为工作区里的 `source/` 与 `derived/` 两层。
+改动以 git 为准，范围固定为文档目录里的 `source/` 与 `derived/` 两层：git 从项目根跑，
+命令里的路径带上文档目录前缀（`prd/source` 这样），接口吐出来的 `changes[].path` 仍是相对
+文档目录的 `source/…`，界面与 agent 不用关心项目根在哪。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -64,7 +66,8 @@ MCP 是可选通道；给 agent 的默认接口是 [命令行](cli.md)。
 
 ## 界面
 
-界面可切换的工作区列表来自用户主目录下的 `.derivedoc/workspaces.json` 注册表。
+界面可切换的工作区列表来自用户主目录下的 `.derivedoc/workspaces.json` 注册表，每条记项目根
+与文档目录（`root` / `docs`）；列表里显示路径用的是文档目录，工作区之间真正的差别在那里。
 
 web 界面由 Vite 构建到 `bld/web`，由服务托管（产物不存在时返回占位页并提示去构建）。
 

@@ -33,8 +33,32 @@ export interface GitCommitResult {
 
 const MESSAGE_FILE = '.derivedoc/commit-message';
 
-/** 只跟踪两层文档；工作区里的其它内容不归这个工具管。 */
-const SCOPES = ['source', 'derived'];
+/** 只跟踪两层文档；项目里的其它内容不归这个工具管。 */
+const LAYERS = ['source', 'derived'];
+
+/** 文档目录相对项目根的路径（项目根就是文档目录时为空串）。 */
+function docsRel(root: string, docs: string): string {
+  const rel = path.relative(path.resolve(root), path.resolve(docs)).replace(/\\/g, '/');
+  return rel === '.' ? '' : rel;
+}
+
+/** git 命令里的作用域：`prd/source`、`prd/derived` 这样带文档目录前缀。 */
+function scopesOf(root: string, docs: string): string[] {
+  const rel = docsRel(root, docs);
+  return LAYERS.map(layer => (rel ? `${rel}/${layer}` : layer));
+}
+
+/** 输出里的路径前缀：仓库前缀 + 文档目录前缀，剥掉它才能拿到 `source/…` 这样的文档路径。 */
+async function docsPrefix(root: string, docs: string): Promise<string> {
+  const rel = docsRel(root, docs);
+  return `${await repoPrefix(root)}${rel ? `${rel}/` : ''}`;
+}
+
+/** 文档路径（`source/x.md`）→ 项目根下的路径（`prd/source/x.md`）。 */
+function filePathOf(root: string, docs: string, file: string): string {
+  const rel = docsRel(root, docs);
+  return rel ? `${rel}/${file}` : file;
+}
 
 function run(root: string, args: string[]): Promise<{code: number; stdout: string; stderr: string}> {
   return new Promise(resolve => {
@@ -56,24 +80,25 @@ function run(root: string, args: string[]): Promise<{code: number; stdout: strin
   });
 }
 
-export async function gitStatus(root: string): Promise<GitStatus> {
+export async function gitStatus(root: string, docs: string): Promise<GitStatus> {
   const inside = await run(root, ['rev-parse', '--is-inside-work-tree']);
 
   if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
     return {available: false, reason: '这个目录不在 git 仓库里', changes: [], otherChanges: 0};
   }
 
+  const scopes = scopesOf(root, docs);
   const [branch, status, message, prefix, overall] = await Promise.all([
     run(root, ['rev-parse', '--abbrev-ref', 'HEAD']),
-    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...SCOPES]),
+    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...scopes]),
     readMessage(root),
-    repoPrefix(root),
+    docsPrefix(root, docs),
     // 目录不展开，否则 node_modules 会撑出几千条。
     run(root, ['status', '--porcelain', '--', '.']),
   ]);
 
   const changes = parsePorcelain(status.stdout, prefix);
-  await attachLineStats(root, changes, prefix);
+  await attachLineStats(root, changes, prefix, scopes);
   const otherChanges = parsePorcelain(overall.stdout, prefix).filter(
     change => !isDocPath(change.path),
   ).length;
@@ -87,8 +112,9 @@ export async function gitStatus(root: string): Promise<GitStatus> {
   };
 }
 
+/** 路径是相对文档目录的，所以这里只比两层名字。 */
 function isDocPath(relPath: string): boolean {
-  return SCOPES.some(scope => relPath === scope || relPath.startsWith(`${scope}/`));
+  return LAYERS.some(layer => relPath === layer || relPath.startsWith(`${layer}/`));
 }
 
 /** 给每个变更文件补上 +/− 行数，方便批量审阅时先扫一眼大小。 */
@@ -96,8 +122,9 @@ async function attachLineStats(
   root: string,
   changes: GitChange[],
   prefix: string,
+  scopes: string[],
 ): Promise<void> {
-  const numstat = await run(root, ['diff', '--numstat', 'HEAD', '--', ...SCOPES]);
+  const numstat = await run(root, ['diff', '--numstat', 'HEAD', '--', ...scopes]);
 
   for (const line of numstat.stdout.split('\n')) {
     const [added, removed, ...rest] = line.split('\t');
@@ -133,10 +160,12 @@ async function attachLineStats(
 
 export async function gitDiff(
   root: string,
+  docs: string,
   file?: string,
   base: 'head' | 'index' = 'head',
 ): Promise<string> {
-  const scoped = file ? ['--', file] : ['--', ...SCOPES];
+  const scopes = scopesOf(root, docs);
+  const scoped = file ? ['--', filePathOf(root, docs, file)] : ['--', ...scopes];
   const hasHead = (await run(root, ['rev-parse', '--verify', '--quiet', 'HEAD'])).code === 0;
   // base=head：已提交版本 ↔ 工作区；base=index：暂存区 ↔ 工作区。
   const result =
@@ -159,7 +188,7 @@ export async function gitDiff(
         '--others',
         '--exclude-standard',
         '--',
-        ...(file ? [file] : SCOPES),
+        ...(file ? [filePathOf(root, docs, file)] : scopes),
       ])
     : await run(root, [
         'ls-files',
@@ -167,17 +196,21 @@ export async function gitDiff(
         '--others',
         '--exclude-standard',
         '--',
-        ...(file ? [file] : SCOPES),
+        ...(file ? [filePathOf(root, docs, file)] : scopes),
       ]);
 
   for (const line of untracked.stdout.split('\n')) {
-    const relPath = line.trim();
+    const raw = line.trim();
+    const prefix = await docsPrefix(root, docs);
+    const relPath = raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
 
     if (!relPath || !relPath.endsWith('.md')) {
       continue;
     }
 
-    const body = await fs.readFile(path.resolve(root, relPath), 'utf8').catch(() => '');
+    const body = await fs.readFile(path.resolve(root, docsRel(root, docs), relPath), 'utf8').catch(
+      () => '',
+    );
     result.stdout += `\ndiff --git a/${relPath} b/${relPath}\nnew file\n${body
       .split('\n')
       .map(text => `+${text}`)
@@ -188,14 +221,14 @@ export async function gitDiff(
 }
 
 /** HEAD（或指定 rev）里的文件内容；文件不在该版本里时返回空串。 */
-export async function gitShow(root: string, file: string, rev = 'HEAD'): Promise<string> {
-  const result = await run(root, ['show', `${rev}:${(await repoPrefix(root)) + file}`]);
+export async function gitShow(root: string, docs: string, file: string, rev = 'HEAD'): Promise<string> {
+  const result = await run(root, ['show', `${rev}:${(await docsPrefix(root, docs)) + file}`]);
   return result.code === 0 ? result.stdout : '';
 }
 
 /** 暂存指定范围（缺省是两层文档整体）。 */
-export async function gitStage(root: string, file?: string): Promise<void> {
-  const targets = file ? [file] : await existingScopes(root);
+export async function gitStage(root: string, docs: string, file?: string): Promise<void> {
+  const targets = file ? [filePathOf(root, docs, file)] : await existingScopes(root, docs);
 
   if (targets.length === 0) {
     return;
@@ -209,8 +242,8 @@ export async function gitStage(root: string, file?: string): Promise<void> {
 }
 
 /** 取消暂存（保留工作区改动）。 */
-export async function gitUnstage(root: string, file?: string): Promise<void> {
-  const targets = file ? [file] : await existingScopes(root);
+export async function gitUnstage(root: string, docs: string, file?: string): Promise<void> {
+  const targets = file ? [filePathOf(root, docs, file)] : await existingScopes(root, docs);
 
   if (targets.length === 0) {
     return;
@@ -224,28 +257,35 @@ export async function gitUnstage(root: string, file?: string): Promise<void> {
 }
 
 /** 只把真正有内容的层交给 git：空目录会让 git 报 pathspec 找不到。 */
-async function existingScopes(root: string): Promise<string[]> {
+async function existingScopes(root: string, docs: string): Promise<string[]> {
+  const rel = docsRel(root, docs);
   const [status, prefix] = await Promise.all([
-    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...SCOPES]),
-    repoPrefix(root),
+    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...scopesOf(root, docs)]),
+    docsPrefix(root, docs),
   ]);
-  const scopes = new Set(
+  const present = new Set(
     parsePorcelain(status.stdout, prefix).map(change => change.path.split('/')[0] ?? ''),
   );
 
-  return SCOPES.filter(scope => scopes.has(scope));
+  return LAYERS.filter(layer => present.has(layer)).map(layer =>
+    rel ? `${rel}/${layer}` : layer,
+  );
 }
 
 /** 暂存区里的文件内容；没有暂存过时返回空串。 */
-export async function gitShowStaged(root: string, file: string): Promise<string> {
-  return gitShow(root, file, ':0');
+export async function gitShowStaged(root: string, docs: string, file: string): Promise<string> {
+  return gitShow(root, docs, file, ':0');
 }
 
 export async function hasCommits(root: string): Promise<boolean> {
   return (await run(root, ['rev-parse', '--verify', '--quiet', 'HEAD'])).code === 0;
 }
 
-export async function gitCommit(root: string, message: string): Promise<GitCommitResult> {
+export async function gitCommit(
+  root: string,
+  docs: string,
+  message: string,
+): Promise<GitCommitResult> {
   const trimmed = message.trim();
 
   if (!trimmed) {
@@ -253,9 +293,10 @@ export async function gitCommit(root: string, message: string): Promise<GitCommi
   }
 
   // 只处理真正有改动的层：git commit 的 pathspec 必须匹配已知路径，空目录会直接报错。
+  const scopes = scopesOf(root, docs);
   const [status, prefix] = await Promise.all([
-    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...SCOPES]),
-    repoPrefix(root),
+    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...scopes]),
+    docsPrefix(root, docs),
   ]);
   const staged = parsePorcelain(status.stdout, prefix).filter(
     change => change.index !== ' ' && change.index !== '?',
@@ -265,16 +306,16 @@ export async function gitCommit(root: string, message: string): Promise<GitCommi
     return {ok: false, error: '还没有暂存任何文档改动'};
   }
 
-  const scopes = [
+  const targets = [
     ...new Set(
       staged
         .map(change => change.path.split('/')[0] ?? '')
-        .filter(scope => (SCOPES as readonly string[]).includes(scope)),
+        .filter(layer => (LAYERS as readonly string[]).includes(layer)),
     ),
-  ];
+  ].map(layer => filePathOf(root, docs, layer));
 
   // 只提交已经暂存的内容：不替用户 add，交什么由 stage 决定。
-  const commit = await run(root, ['commit', '-m', trimmed, '--', ...scopes]);
+  const commit = await run(root, ['commit', '-m', trimmed, '--', ...targets]);
 
   if (commit.code !== 0) {
     return {ok: false, error: (commit.stderr || commit.stdout).trim() || 'git commit 失败'};

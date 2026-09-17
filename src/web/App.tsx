@@ -27,6 +27,8 @@ import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/dif
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
 import {api, ApiError, messageOf} from './api.ts';
+import {useToasts} from './hooks/useToasts.ts';
+import {useWorkspaces} from './hooks/useWorkspaces.ts';
 import {MarkdownDiff, MarkdownEditor, type Pick} from './editors.tsx';
 import {draftMessage, formatTime, shortenPath, statusLabel} from './format.ts';
 import {buildTree, countDocs, fileName, flattenTree, type TreeNode} from './tree.ts';
@@ -100,7 +102,6 @@ function Workspace() {
   const [busy, setBusy] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [toasts, setToasts] = useState<Toast[]>([]);
   const [git, setGit] = useState<GitStatus>();
   const [gitFile, setGitFile] = useState<string>();
   const [gitDiffText, setGitDiffText] = useState('');
@@ -108,10 +109,6 @@ function Workspace() {
   const [reviewBase, setReviewBase] = useState<'head' | 'index'>('head');
   const [gitMessage, setGitMessage] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
-  const [workspace, setWorkspace] = useState<{root: string; docs: string; name: string}>();
-  const [workspaceList, setWorkspaceList] = useState<
-    Array<{id: string; name: string; root: string; docs: string; open: boolean}>
-  >([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState('');
   const [newDocs, setNewDocs] = useState('');
@@ -222,46 +219,9 @@ function Workspace() {
   const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
   const focusEditorRef = useRef(false);
   const autoPickedRef = useRef(false);
-  /** 提示条的最新值与各自的定时器：同 key 就地更新，不叠两条。 */
-  const toastsRef = useRef<Toast[]>([]);
-  const timersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
   stateRef.current = {doc, draft, selected};
-  toastsRef.current = toasts;
 
-  const notify = useCallback((text: string, key?: string) => {
-    if (!text) {
-      return;
-    }
-
-    const kind: Toast['kind'] = /失败|错误|无法|不在/.test(text)
-      ? 'error'
-      : /已保存|已提交|已删除|已载入|生效/.test(text)
-        ? 'ok'
-        : 'info';
-    const existing = key ? toastsRef.current.find(toast => toast.key === key) : undefined;
-    const id = existing?.id ?? Date.now() + Math.random();
-
-    const next: Toast = {id, kind, text, ...(key ? {key} : {})};
-    setToasts(current => {
-      const rest = current.filter(toast => toast.id !== id);
-      return existing
-        ? current.map(toast => (toast.id === id ? next : toast))
-        : [...rest.slice(-2), next];
-    });
-
-    if (existing) {
-      clearTimeout(timersRef.current.get(id));
-    }
-
-    timersRef.current.set(
-      id,
-      setTimeout(() => {
-        timersRef.current.delete(id);
-        setToasts(current => current.filter(toast => toast.id !== id));
-      }, 3200),
-    );
-  }, []);
-
+  const {toasts, notify} = useToasts();
   const setStatus = notify;
 
   const changeByPath = useMemo(
@@ -314,28 +274,7 @@ function Workspace() {
     return list;
   }, [workspaceId]);
 
-  const loadWorkspaces = useCallback(async () => {
-    const payload = await api.workspaces().catch(() => undefined);
-
-    if (payload) {
-      setWorkspaceList(payload.workspaces);
-    }
-  }, []);
-
-  useEffect(() => {
-    void (async () => {
-      const payload = await api.workspace(workspaceId).catch(() => undefined);
-
-      if (!payload) {
-        return;
-      }
-
-      const name = payload.root.split('/').filter(Boolean).pop() ?? payload.root;
-      setWorkspace({root: payload.root, docs: payload.docs, name});
-      document.title = `${name} · derivedoc`;
-    })();
-    void loadWorkspaces();
-  }, [workspaceId, loadWorkspaces]);
+  const {workspace, workspaces, loadWorkspaces} = useWorkspaces(workspaceId);
 
   const loadDoc = useCallback(async (id: string) => {
     let payload: Doc;
@@ -1071,10 +1010,10 @@ function Workspace() {
                 <div aria-label="切换工作区" className="switcher" role="dialog">
                   <p className="switcher-head">
                     <span>切换到</span>
-                    <span className="switcher-count">{workspaceList.length}</span>
+                    <span className="switcher-count">{workspaces.length}</span>
                   </p>
                   <ul className="switcher-list">
-                    {workspaceList.map(item => (
+                    {workspaces.map(item => (
                       <li key={item.id}>
                         <button
                           className={`switcher-item${item.id === workspaceId ? ' current' : ''}`}
@@ -1104,7 +1043,7 @@ function Workspace() {
                       </li>
                     ))}
                   </ul>
-                  {workspaceList.length === 0 && (
+                  {workspaces.length === 0 && (
                     <p className="switcher-empty">还没有记录过任何工作区</p>
                   )}
                   <form

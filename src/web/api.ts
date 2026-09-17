@@ -126,12 +126,15 @@ export const api = {
 
   stage: (workspace: string, file?: string, unstage = false) =>
     request<GitStatus>(
-      '/api/git/stage',
+      `/api/git/stage?${query(workspace)}`,
       json('POST', {...(file ? {path: file} : {}), ...(unstage ? {unstage: true} : {})}),
     ),
 
   commit: (workspace: string, message: string) =>
-    request<{ok: boolean; sha?: string; error?: string}>('/api/git/commit', json('POST', {message})),
+    request<{ok: boolean; sha?: string; error?: string}>(
+      `/api/git/commit?${query(workspace)}`,
+      json('POST', {message}),
+    ),
 
   /** 选区：界面选中一段就写它，收起来就清掉。 */
   putSelection: (workspace: string, selection: {doc: string; from: number; to: number; quote: string; revision?: string}) =>

@@ -5,9 +5,9 @@ import fs from 'node:fs/promises';
 
 import {
   createWorkspace,
-  findProjectRoot,
+  DEFAULT_DOCS_DIR,
+  describeWorkspace,
   initProject,
-  resolveWorkspace,
   writeDocsDir,
   type InitResult,
   type WorkspacePaths,
@@ -59,11 +59,11 @@ const HELP = `derivedoc — source 沉淀决定，derived 承载方案
 
 工作区
   项目根放 .derivedoc/（运行数据，也是 git 作用域），文档目录放 source/ 与 derived/。
-  项目根默认当前目录；第一次创建必须用 --doc-dir 指明文档目录，它会记进
+  项目根默认当前目录，文档目录默认 ${DEFAULT_DOCS_DIR}/；指定的文档目录记进
   .derivedoc/config.json，之后的调用可以省略。
 
 选项
-      --doc-dir <目录>     文档目录，相对项目根；省略时用项目里记下的
+      --doc-dir <目录>     文档目录，相对项目根；省略时用项目里记下的，没记过就用 ${DEFAULT_DOCS_DIR}/
   -p, --port <端口>        监听端口，默认 ${DEFAULT_PORT}（被占用时自动顺延）
       --host <地址>        监听地址，默认 127.0.0.1
       --open               启动后打开浏览器
@@ -74,7 +74,8 @@ const HELP = `derivedoc — source 沉淀决定，derived 承载方案
   -v, --version            显示版本
 
 示例
-  dd --doc-dir=prd                       # 建工作区：项目根是当前目录，文档在 prd/
+  dd                                     # 建工作区：项目根是当前目录，文档在 ddoc/
+  dd . --doc-dir=prd                     # 文档改放 prd/
   dd ./app --doc-dir=.                   # 项目根与文档目录都是 ./app
   dd ls                                  # 之后在项目里不带目录也能用
   dd read source/requirements | head -20
@@ -85,7 +86,6 @@ const HELP = `derivedoc — source 沉淀决定，derived 承载方案
 async function main(): Promise<void> {
   const {positionals, options} = parseArgs(process.argv.slice(2));
   const json = options.get('json') === true;
-  const cwd = process.cwd();
   // 第一位是项目根；如果它本身是个子命令，就按「在 cwd 里跑子命令」理解。
   const [first, ...tail] = positionals;
   const inline = first !== undefined && COMMANDS.has(first);
@@ -106,12 +106,6 @@ async function main(): Promise<void> {
 
   try {
     if (!command) {
-      // 什么都没给、cwd 里也没有项目时只打帮助：第一次创建要显式说明文档目录。
-      if (!positionals.length && !docDir && !(await findProjectRoot(cwd))) {
-        process.stdout.write(HELP);
-        return;
-      }
-
       await serve(
         projectDir,
         docDir,
@@ -162,24 +156,20 @@ async function serve(
   }
 
   const cwd = process.cwd();
-  const existing = await resolveWorkspace(projectDir, docDir, {cwd});
+  const resolved = await describeWorkspace(projectDir, docDir, {cwd});
   let paths: WorkspacePaths;
   let init: InitResult;
 
-  if (existing) {
+  if (resolved.exists) {
     // 显式给了文档目录就以它为准，并记进项目配置，之后不带 --doc-dir 也认得。
     if (docDir) {
-      await writeDocsDir(existing.root, existing.docs);
+      await writeDocsDir(resolved.root, resolved.docs);
     }
 
-    paths = existing;
-    init = await initProject(existing.root, existing.docs);
+    paths = {root: resolved.root, docs: resolved.docs};
+    init = await initProject(paths.root, paths.docs);
   } else {
-    if (!docDir) {
-      throw new CliError(await missingWorkspaceHint(projectDir, cwd));
-    }
-
-    const created = await createWorkspace(projectDir, docDir, {cwd});
+    const created = await createWorkspace(projectDir, docDir ?? DEFAULT_DOCS_DIR, {cwd});
     paths = {root: created.root, docs: created.docs};
     init = created.init;
   }

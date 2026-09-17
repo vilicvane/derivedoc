@@ -1,11 +1,19 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+
+import {DEFAULT_DOCS_DIR} from './defaults.ts';
+
+export {DEFAULT_DOCS_DIR};
 
 /** 工作区标记目录：只由 derivedoc 建立，用它区分「这个目录属于 dd 项目」。 */
 export const PROJECT_MARKER = '.derivedoc';
 
 /** 项目根里记文档目录的文件，相对 `.derivedoc/`。 */
 const CONFIG_FILE = 'config.json';
+
+/** 两层文档的目录名。 */
+const LAYERS = ['source', 'derived'] as const;
 
 /**
  * 一个工作区分两处：项目根放 `.derivedoc/`（运行数据、git 作用域），文档目录放
@@ -16,6 +24,13 @@ export interface WorkspacePaths {
   root: string;
   /** 文档目录：`source/` 与 `derived/` 所在。 */
   docs: string;
+}
+
+export interface ResolvedWorkspace extends WorkspacePaths {
+  /** 项目根已经存在（带 `.derivedoc/`），还是这一对路径还没建过。 */
+  exists: boolean;
+  /** 文档目录是从项目配置里读出来的。 */
+  recorded: boolean;
 }
 
 const SOURCE_SEED = `# 需求与决定
@@ -39,6 +54,10 @@ export async function initProject(root: string, docs?: string): Promise<InitResu
   const created: string[] = [];
   let existed = false;
   let sourceCreated = false;
+
+  if (rootDir === path.resolve(os.homedir())) {
+    throw new Error('不把家目录当工作区：请在具体项目目录里跑 dd');
+  }
 
   try {
     const stat = await fs.stat(rootDir);
@@ -156,6 +175,11 @@ export async function writeDocsDir(root: string, docs: string): Promise<void> {
 }
 
 export async function isProjectRoot(dir: string): Promise<boolean> {
+  // 家目录也是用户级注册表的所在，不把整个家当项目——一个向上查找就能毁掉一切。
+  if (path.resolve(dir) === path.resolve(os.homedir())) {
+    return false;
+  }
+
   try {
     return (await fs.stat(path.join(path.resolve(dir), PROJECT_MARKER))).isDirectory();
   } catch {
@@ -163,19 +187,38 @@ export async function isProjectRoot(dir: string): Promise<boolean> {
   }
 }
 
+/** 这个项目根里的文档目录：显式给的 > 记下的 > 老布局（两层就在根下）> 默认 `ddoc/`。 */
+export async function docsDirFor(root: string, explicit?: string): Promise<string> {
+  if (explicit) {
+    return path.resolve(root, explicit);
+  }
+
+  const recorded = await readDocsDir(root);
+
+  if (recorded) {
+    return recorded;
+  }
+
+  for (const layer of LAYERS) {
+    try {
+      if ((await fs.stat(path.join(root, layer))).isDirectory()) {
+        return path.resolve(root);
+      }
+    } catch {
+      // 继续看下一层。
+    }
+  }
+
+  return path.join(path.resolve(root), DEFAULT_DOCS_DIR);
+}
+
 /** 从 dir 往上找最近的项目根，找不到返回 undefined。 */
 export async function findProjectRoot(dir: string): Promise<string | undefined> {
   let current = path.resolve(dir);
 
   for (;;) {
-    try {
-      const stat = await fs.stat(path.join(current, PROJECT_MARKER));
-
-      if (stat.isDirectory()) {
-        return current;
-      }
-    } catch {
-      // 继续往上找。
+    if (await isProjectRoot(current)) {
+      return current;
     }
 
     const parent = path.dirname(current);
@@ -191,61 +234,49 @@ export async function findProjectRoot(dir: string): Promise<string | undefined> 
 /**
  * 解析已有工作区：项目根 + 文档目录。
  *
- * 项目根默认是 cwd；它不是项目根时向上找最近的那个——在项目的子目录里敲 dd 也应该能用。
+ * input 默认是 cwd。它不是项目根时向上找最近的那个——在项目的子目录里敲 dd 也应该能用；
  * 但显式给了文档目录时不做这种猜测：给的是哪一对就是哪一对，免得在别处误开上层项目。
- * 文档目录省略时用项目里记下的那个，没记过就取项目根。
+ * 没命中就按「这一对还没建过」返回，由调用方决定要不要建。
  */
-export async function resolveWorkspace(
-  projectDir: string,
+export async function describeWorkspace(
+  input: string,
   docDir?: string,
   options: {cwd?: string} = {},
-): Promise<WorkspacePaths | undefined> {
+): Promise<ResolvedWorkspace> {
   const cwd = options.cwd ?? process.cwd();
-  let root = path.resolve(cwd, projectDir);
+  let root = path.resolve(cwd, input);
+  let exists = await isProjectRoot(root);
 
-  if (!(await isProjectRoot(root))) {
-    if (docDir) {
-      return undefined;
-    }
-
+  if (!exists && !docDir) {
     const enclosing = await findProjectRoot(root);
 
-    if (!enclosing) {
-      return undefined;
+    if (enclosing) {
+      root = enclosing;
+      exists = true;
     }
-
-    root = enclosing;
   }
 
-  const docs = docDir ? path.resolve(root, docDir) : ((await readDocsDir(root)) ?? root);
-  return {root, docs};
-}
-
-/**
- * 定位 dir 属于哪个工作区（界面上粘路径时用）：dir 是项目根就用它，否则向上找最近的
- * 项目根，并把 dir 当作文档目录。CLI 不走这条——它要求把两者分清楚。
- */
-export async function locateWorkspace(
-  dir: string,
-  options: {cwd?: string} = {},
-): Promise<WorkspacePaths | undefined> {
-  const start = path.resolve(options.cwd ?? process.cwd(), dir);
-
-  if (await isProjectRoot(start)) {
-    return {root: start, docs: (await readDocsDir(start)) ?? start};
-  }
-
-  const root = await findProjectRoot(start);
-  return root ? {root, docs: start} : undefined;
+  const recorded = docDir ? undefined : await readDocsDir(root);
+  return {
+    root,
+    docs: await docsDirFor(root, docDir),
+    exists,
+    recorded: recorded !== undefined,
+  };
 }
 
 /** 建工作区：项目根与文档目录都要给，文档目录相对项目根解析。 */
 export async function createWorkspace(
   projectDir: string,
-  docDir: string,
+  docDir: string = DEFAULT_DOCS_DIR,
   options: {cwd?: string} = {},
 ): Promise<WorkspacePaths & {init: InitResult}> {
   const root = path.resolve(options.cwd ?? process.cwd(), projectDir);
+
+  if (root === path.resolve(os.homedir())) {
+    throw new Error('不把家目录当项目根：请在具体项目目录里建工作区');
+  }
+
   const docs = path.resolve(root, docDir);
   const init = await initProject(root, docs);
 

@@ -22,10 +22,22 @@ import {
 } from 'react-router';
 
 import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/diff.ts';
+import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
 import {MarkdownDiff, MarkdownEditor} from './editors.tsx';
 
 const markdown = new MarkdownIt({html: false, linkify: true});
+
+/** 文档目录相对项目根的形式；在根下就显示相对路径，否则给绝对路径。 */
+function relativeDocs(probe: {root: string; docs: string}): string {
+  if (probe.docs === probe.root) {
+    return '.';
+  }
+
+  return probe.docs.startsWith(`${probe.root}/`)
+    ? probe.docs.slice(probe.root.length + 1)
+    : probe.docs;
+}
 
 function draftMessage(changes: GitChange[]): string {
   if (changes.length === 0) {
@@ -106,6 +118,15 @@ interface GitStatus {
   changes: GitChange[];
   message?: string;
   otherChanges: number;
+}
+
+/** `/api/resolve` 的回答：这条路径会是哪个工作区，文档目录在哪。 */
+interface WorkspaceProbe {
+  root: string;
+  docs: string;
+  exists: boolean;
+  recorded: boolean;
+  name: string;
 }
 
 interface TreeNode {
@@ -258,6 +279,10 @@ function Workspace() {
   >([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState('');
+  const [newDocs, setNewDocs] = useState('');
+  const [newDocsTouched, setNewDocsTouched] = useState(false);
+  const [probe, setProbe] = useState<WorkspaceProbe>();
+  const [probeError, setProbeError] = useState<string>();
   const [provenance, setProvenance] = useState<ConversationRecord[]>([]);
   const [showProvenance, setShowProvenance] = useState(false);
 
@@ -275,6 +300,51 @@ function Workspace() {
     window.addEventListener('keydown', close);
     return () => window.removeEventListener('keydown', close);
   }, [switcherOpen]);
+
+  // 界面里填路径时先问服务端一句：这是哪个工作区、文档目录会落在哪。
+  useEffect(() => {
+    const path = newWorkspace.trim();
+
+    if (!switcherOpen || !path) {
+      setProbe(undefined);
+      setProbeError(undefined);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const query = new URLSearchParams({path});
+
+        if (newDocsTouched && newDocs.trim()) {
+          query.set('docs', newDocs.trim());
+        }
+
+        const response = await fetch(`/api/resolve?${query}`).catch(() => undefined);
+
+        if (!response?.ok) {
+          setProbe(undefined);
+          setProbeError(
+            response
+              ? (((await response.json().catch(() => undefined)) as {error?: {message?: string}})
+                  ?.error?.message ?? `认不出来（${response.status}）`)
+              : '服务没有响应',
+          );
+          return;
+        }
+
+        const payload = (await response.json()) as WorkspaceProbe;
+        setProbe(payload);
+        setProbeError(undefined);
+
+        // 用户没自己填文档目录时，把服务端认出来的那个填进去，省得猜。
+        if (!newDocsTouched) {
+          setNewDocs(relativeDocs(payload));
+        }
+      })();
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [switcherOpen, newWorkspace, newDocs, newDocsTouched]);
 
   // 路由即状态：/d/<id> 看文档，?diff=1 看改动，/changes 看提交面板。
   const navigate = useNavigate();
@@ -1151,6 +1221,23 @@ function Workspace() {
     return `…/${tail}`;
   };
 
+  /** 添加表单里的那行说明：还没填就说默认，填了就报认出来的结果。 */
+  const describeProbe = () => {
+    if (probeError) {
+      return probeError;
+    }
+
+    if (!probe) {
+      return `文档目录默认 ${DEFAULT_DOCS_DIR}/，粘项目根先认一下。`;
+    }
+
+    if (probe.exists) {
+      return `已有工作区「${probe.name}」${probe.recorded ? '，文档目录来自配置' : ''}`;
+    }
+
+    return `还没建过：会建 .derivedoc/ 与 ${relativeDocs(probe)}/`;
+  };
+
   return (
     <div className="layout">
       <aside className="sidebar">
@@ -1226,7 +1313,10 @@ function Workspace() {
                         const response = await fetch('/api/workspaces', {
                           method: 'POST',
                           headers: {'content-type': 'application/json'},
-                          body: JSON.stringify({root: newWorkspace.trim()}),
+                          body: JSON.stringify({
+                            root: newWorkspace.trim(),
+                            docs: newDocs.trim(),
+                          }),
                         });
                         const payload = (await response.json()) as {
                           workspace?: {id: string};
@@ -1239,21 +1329,42 @@ function Workspace() {
                         }
 
                         setNewWorkspace('');
+                        setNewDocs('');
+                        setNewDocsTouched(false);
+                        setProbe(undefined);
+                        setProbeError(undefined);
                         setSwitcherOpen(false);
                         await loadWorkspaces();
                         navigate(`/w/${payload.workspace.id}/`);
                       })();
                     }}
                   >
-                    <input
-                      aria-label="工作区目录"
-                      onChange={event => setNewWorkspace(event.target.value)}
-                      placeholder="项目根或文档目录…"
-                      value={newWorkspace}
-                    />
-                    <button aria-label="添加工作区" title="添加工作区" type="submit">
-                      <Plus size={14} />
-                    </button>
+                    <label className="add-row">
+                      <span className="add-label">项目根</span>
+                      <input
+                        onChange={event => setNewWorkspace(event.target.value)}
+                        placeholder="~/projects/foo"
+                        value={newWorkspace}
+                      />
+                    </label>
+                    <label className="add-row">
+                      <span className="add-label">文档目录</span>
+                      <input
+                        onChange={event => {
+                          setNewDocs(event.target.value);
+                          setNewDocsTouched(true);
+                        }}
+                        placeholder={`${DEFAULT_DOCS_DIR}（默认）`}
+                        value={newDocs}
+                      />
+                    </label>
+                    <div className="add-foot">
+                      <p className="add-note">{describeProbe()}</p>
+                      <button aria-label="添加工作区" title="添加工作区" type="submit">
+                        <Plus size={14} />
+                        添加
+                      </button>
+                    </div>
                   </form>
                 </div>
               </>

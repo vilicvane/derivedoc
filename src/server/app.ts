@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import {Hono, type Context} from 'hono';
 
 import {DocStoreError, isDocStoreError} from '../core/errors.ts';
 import {readConversations} from '../core/conversations.ts';
+import {describeWorkspace} from '../core/project.ts';
 import {
   gitCommit,
   gitDiff,
@@ -105,15 +107,45 @@ export function createApp(hub: WorkspaceHub): Hono {
 
   app.get('/api/workspaces', async c => c.json({workspaces: await hub.list(), defaultId: hub.defaultId}));
 
+  /** 界面填路径时先问一句：这是哪个工作区、文档目录在哪、要不要新建。 */
+  app.get('/api/resolve', async c => {
+    const input = c.req.query('path');
+
+    if (!input?.trim()) {
+      return c.json({error: {code: 'invalid_id', message: '缺少 path'}}, 400);
+    }
+
+    const docs = c.req.query('docs');
+    const resolved = await describeWorkspace(input.trim(), docs?.trim() || undefined, {
+      cwd: process.cwd(),
+    });
+
+    if (resolved.root === path.resolve(os.homedir())) {
+      return c.json(
+        {error: {code: 'invalid_id', message: '不把家目录当工作区：请填具体项目目录'}},
+        400,
+      );
+    }
+
+    return c.json({
+      root: resolved.root,
+      docs: resolved.docs,
+      exists: resolved.exists,
+      recorded: resolved.recorded,
+      name: path.basename(resolved.root) || resolved.root,
+    });
+  });
+
   app.post('/api/workspaces', async c => {
-    const body = (await c.req.json().catch(() => ({}))) as {root?: unknown};
+    const body = (await c.req.json().catch(() => ({}))) as {root?: unknown; docs?: unknown};
 
     if (typeof body.root !== 'string' || !body.root.trim()) {
       return c.json({error: {code: 'invalid_id', message: '需要一个工作区路径'}}, 400);
     }
 
     try {
-      return c.json({workspace: await hub.add(body.root.trim())});
+      const docs = typeof body.docs === 'string' ? body.docs.trim() : '';
+      return c.json({workspace: await hub.add(body.root.trim(), docs || undefined)});
     } catch (error) {
       return c.json({error: {code: 'invalid_id', message: String((error as Error).message)}}, 400);
     }

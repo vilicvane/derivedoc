@@ -16,7 +16,8 @@ npm run dd                # 在项目里起服务，打印 web 地址与 MCP 接
 服务不是必须的。文档读写直接走 CLI 就行，只有需要界面或 MCP 时才起服务：
 
 ```sh
-dd --doc-dir=prd                               # 第一次：建工作区，项目根是当前目录，文档放 prd/
+dd                                             # 第一次：建工作区，文档放 ddoc/
+dd --doc-dir=prd                               # 想叫 prd/ 就指定一次，之后记住
 dd ls [--kind source|derived] [--json]         # 列出文档
 dd read <id> [--json]                          # 打印正文
 dd stat <id>                                   # 只打印修订号
@@ -47,16 +48,16 @@ codex mcp add derivedoc --url http://127.0.0.1:7788/mcp
 
 ```text
 .derivedoc/      本地数据：对话记录、待审阅改动、记下的文档目录
-prd/             文档目录（创建时指定，默认就是项目根）
+ddoc/            文档目录，默认叫这个名字
   source/        人提出的需求与讨论后定下的决定
   derived/       agent 据此维护的设计方案
 ```
 
 工作区分两处：**项目根**（`.derivedoc/` 所在，也是 git 作用域）和**文档目录**
 （`source/` 与 `derived/` 所在）。位置参数是项目根（默认当前目录），文档目录走
-`--doc-dir`：`dd --doc-dir=prd` 会把当前目录当项目根、把 `prd/` 当文档目录记进
-`.derivedoc/config.json`，之后 `dd` 不带它也能找到。项目根要显式指定时写
-`dd ./app --doc-dir=.`。
+`--doc-dir`（默认 `ddoc`）。用过的文档目录记进 `.derivedoc/config.json`，之后 `dd` 不带它
+也能找到：`dd --doc-dir=prd`、`dd ./app --doc-dir=.` 都是这个意思。界面上加工作区时同样填
+这两项。
 
 文档 id 相对文档目录，是路径去掉 `.md`，例如 `source/requirements`。写入可以带
 `base_revision` 做并发校验，不匹配会返回 `conflict`。

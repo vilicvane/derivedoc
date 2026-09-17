@@ -7,10 +7,10 @@ import test from 'node:test';
 
 import {
   createWorkspace,
+  DEFAULT_DOCS_DIR,
+  describeWorkspace,
   initProject,
-  locateWorkspace,
   readDocsDir,
-  resolveWorkspace,
 } from '../src/core/project.ts';
 
 const CLI = path.resolve(import.meta.dirname, '../src/cli/main.ts');
@@ -56,29 +56,61 @@ test('项目根放 .derivedoc，文档目录放两层文档', async () => {
   await assert.rejects(fs.stat(path.join(root, 'source')));
 });
 
-test('resolveWorkspace：不带 --doc-dir 时用项目里记下的', async () => {
+test('describeWorkspace：不带 --doc-dir 时用项目里记下的', async () => {
   const dir = await tempDir();
   await initProject(dir);
 
-  assert.deepEqual(await resolveWorkspace(dir), {root: dir, docs: dir});
-  assert.deepEqual(await resolveWorkspace(dir, 'prd'), {root: dir, docs: path.join(dir, 'prd')});
+  assert.deepEqual(await describeWorkspace(dir), {
+    root: dir,
+    docs: dir,
+    exists: true,
+    recorded: true,
+  });
+  assert.deepEqual(await describeWorkspace(dir, 'prd'), {
+    root: dir,
+    docs: path.join(dir, 'prd'),
+    exists: true,
+    recorded: false,
+  });
 });
 
-test('resolveWorkspace：项目根没标记时返回 undefined', async () => {
+test('describeWorkspace：还没建过时给默认文档目录，位置仍按给的来', async () => {
   const dir = await tempDir();
 
-  assert.equal(await resolveWorkspace(dir), undefined);
-  assert.equal(await resolveWorkspace(dir, 'prd'), undefined);
+  assert.deepEqual(await describeWorkspace(dir), {
+    root: dir,
+    docs: path.join(dir, DEFAULT_DOCS_DIR),
+    exists: false,
+    recorded: false,
+  });
+  assert.deepEqual(await describeWorkspace(dir, 'prd'), {
+    root: dir,
+    docs: path.join(dir, 'prd'),
+    exists: false,
+    recorded: false,
+  });
 });
 
-test('locateWorkspace：给的目录在项目里时向上找项目根，把它当文档目录', async () => {
+test('describeWorkspace：给的目录在项目里时向上找项目根，文档目录仍以项目记下的为准', async () => {
   const root = await tempDir();
   const docs = path.join(root, 'prd');
   await initProject(root, docs);
 
-  assert.deepEqual(await locateWorkspace(docs), {root, docs});
-  assert.deepEqual(await locateWorkspace(root), {root, docs});
-  assert.deepEqual(await locateWorkspace('.', {cwd: root}), {root, docs});
+  assert.deepEqual(await describeWorkspace(docs), {root, docs, exists: true, recorded: true});
+  assert.deepEqual(await describeWorkspace(root), {root, docs, exists: true, recorded: true});
+  assert.deepEqual(await describeWorkspace('.', undefined, {cwd: root}), {
+    root,
+    docs,
+    exists: true,
+    recorded: true,
+  });
+  // 子目录也一样：认得出所属项目，不会把子目录当成文档目录。
+  assert.deepEqual(await describeWorkspace('source', undefined, {cwd: docs}), {
+    root,
+    docs,
+    exists: true,
+    recorded: true,
+  });
 });
 
 test('createWorkspace：文档目录相对项目根', async () => {
@@ -151,7 +183,20 @@ test('子命令可以省掉项目根：在项目里直接 dd ls', async () => {
   assert.equal(JSON.parse((await dd([docs, 'root', '--json'])).stdout).root, root);
 });
 
-test('创建时项目根可以省略，--doc-dir 必给', async () => {
+test('项目根与文档目录都能省：创建时默认 ddoc/', async () => {
+  const dir = await tempDir();
+  const written = await dd(['write', 'derived/plan'], {input: '# 方案\n', cwd: dir});
+
+  assert.equal(written.code, 0);
+  assert.equal(await readDocsDir(dir), path.join(dir, DEFAULT_DOCS_DIR));
+  assert.equal((await fs.stat(path.join(dir, '.derivedoc'))).isDirectory(), true);
+  assert.equal(
+    (await fs.readFile(path.join(dir, DEFAULT_DOCS_DIR, 'derived/plan.md'), 'utf8')).trim(),
+    '# 方案',
+  );
+});
+
+test('指定 --doc-dir 时按指定目录建', async () => {
   const dir = await tempDir();
   const written = await dd(['--doc-dir=prd', 'write', 'derived/plan'], {
     input: '# 方案\n',
@@ -160,7 +205,6 @@ test('创建时项目根可以省略，--doc-dir 必给', async () => {
 
   assert.equal(written.code, 0);
   assert.equal(await readDocsDir(dir), path.join(dir, 'prd'));
-  assert.equal((await fs.stat(path.join(dir, '.derivedoc'))).isDirectory(), true);
   assert.equal(
     (await fs.readFile(path.join(dir, 'prd/derived/plan.md'), 'utf8')).trim(),
     '# 方案',

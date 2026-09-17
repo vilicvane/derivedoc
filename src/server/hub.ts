@@ -1,5 +1,5 @@
 import type {DocChange} from '../core/types.ts';
-import {initProject, locateWorkspace, type WorkspacePaths} from '../core/project.ts';
+import {describeWorkspace, initProject, type WorkspacePaths} from '../core/project.ts';
 import {listWorkspaces, registerWorkspace, workspaceId, type WorkspaceRef} from '../core/registry.ts';
 import {DocStore} from '../core/store.ts';
 
@@ -60,9 +60,9 @@ export class WorkspaceHub {
     }
 
     // 以项目里记下的文档目录为准：--doc-dir 改过之后，注册表可能还是旧的。
-    const paths = await locateWorkspace(known.root, {cwd: known.root});
+    const paths = await describeWorkspace(known.root, undefined, {cwd: known.root});
 
-    if (!paths) {
+    if (!paths.exists) {
       return undefined;
     }
 
@@ -70,18 +70,12 @@ export class WorkspaceHub {
     return this.#views.get(id);
   }
 
-  /** 显式添加一个工作区（界面上填路径时用）：路径可以是项目根，也可以是文档目录。 */
-  async add(input: string): Promise<WorkspaceRef> {
-    const resolved = await locateWorkspace(input, {cwd: process.cwd()});
-
-    if (!resolved) {
-      throw new Error(
-        `${input} 里找不到 .derivedoc 目录：先在项目根跑 dd <文档目录> 建工作区`,
-      );
-    }
+  /** 加入一个工作区（界面上填路径时用）：没有就按这对路径建一个。 */
+  async add(input: string, docDir?: string): Promise<WorkspaceRef> {
+    const resolved = await describeWorkspace(input, docDir, {cwd: process.cwd()});
 
     await initProject(resolved.root, resolved.docs);
-    return this.openRoot(resolved);
+    return this.openRoot({root: resolved.root, docs: resolved.docs});
   }
 
   onChange(listener: (change: WorkspaceChange) => void): () => void {

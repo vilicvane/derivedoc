@@ -22,8 +22,9 @@ if (!prompt.trim() || !sessionId) {
   process.exit(0);
 }
 
-// 钩子的 shell 只在「cwd 位于项目内」时直接给路径；其余情况（比如在父目录里工作，项目在
-// 它下面）由这里查注册表，挑最近打开、且项目根或文档目录位于当前目录之下的那个。
+// 钩子的 shell 只在「cwd 位于项目内」时直接给路径；其余情况（在项目的父目录里工作）由这里
+// 查注册表，只认紧挨着的那个项目——不然在 $HOME 或 ~/projects 里干活，消息会被记到某个
+// 深处的工作区去。
 const workspaceRoot = root || (await resolveWorkspaceFromRegistry(payload.cwd));
 
 if (!workspaceRoot) {
@@ -285,13 +286,14 @@ async function resolveWorkspaceFromRegistry(cwd) {
     return undefined;
   }
 
-  for (const entry of entries) {
-    const roots = [entry.root, entry.docs].filter(Boolean);
+  // 只认紧挨着的项目，而且只有一个候选时才认：多个候选说明这个目录不属于谁。
+  const matches = new Set(
+    entries
+      .filter(entry =>
+        [entry.root, entry.docs].filter(Boolean).some(root => path.dirname(root) === target),
+      )
+      .map(entry => entry.root),
+  );
 
-    if (roots.some(root => root === target || root.startsWith(`${target}/`))) {
-      return entry.root;
-    }
-  }
-
-  return undefined;
+  return matches.size === 1 ? [...matches][0] : undefined;
 }

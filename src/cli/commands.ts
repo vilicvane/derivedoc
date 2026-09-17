@@ -4,9 +4,10 @@ import path from 'node:path';
 import {DocStoreError, isDocStoreError} from '../core/errors.ts';
 import {
   createWorkspace,
+  DEFAULT_DOCS_DIR,
+  describeWorkspace,
   findProjectRoot,
   initProject,
-  resolveWorkspace,
   writeDocsDir,
   type WorkspacePaths,
 } from '../core/project.ts';
@@ -71,9 +72,8 @@ export async function missingWorkspaceHint(projectDir: string, cwd: string): Pro
   }
 
   return [
-    `${root} 还不是 derivedoc 工作区：第一次创建要指明文档目录，例如`,
-    `  ${prefix} --doc-dir=prd     # 项目根是${projectArg ? ` ${projectArg}` : '当前目录'}，文档放 prd/`,
-    `  ${prefix} --doc-dir=.       # 文档就放项目根`,
+    `${root} 还不是 derivedoc 工作区：${prefix} 会在这里建一个，文档目录默认 ${DEFAULT_DOCS_DIR}/。`,
+    `  想放别处就带上 --doc-dir，例如 ${prefix} --doc-dir=prd；文档放项目根时用 --doc-dir=.`,
   ].join('\n');
 }
 
@@ -102,11 +102,7 @@ async function prepareWorkspace(
     return existing;
   }
 
-  if (!docDir) {
-    throw new CliError(await readOnlyHint(projectDir, docDir));
-  }
-
-  const created = await createWorkspace(projectDir, docDir);
+  const created = await createWorkspace(projectDir, docDir ?? DEFAULT_DOCS_DIR);
   return {root: created.root, docs: created.docs};
 }
 
@@ -132,13 +128,13 @@ async function commandWorkspace(
   projectDir: string,
   docDir: string | undefined,
 ): Promise<WorkspacePaths | undefined> {
-  const workspace = await resolveWorkspace(projectDir, docDir);
+  const workspace = await describeWorkspace(projectDir, docDir);
 
-  if (workspace && docDir) {
+  if (workspace.exists && docDir) {
     await writeDocsDir(workspace.root, workspace.docs);
   }
 
-  return workspace;
+  return workspace.exists ? {root: workspace.root, docs: workspace.docs} : undefined;
 }
 
 /** 判断目录属于哪个 derivedoc 工作区；不属于则退出码 1。 */

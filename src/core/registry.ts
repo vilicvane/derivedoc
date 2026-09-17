@@ -23,8 +23,16 @@ export interface WorkspaceRef {
 }
 
 function registryFile(): string {
-  const home = os.homedir();
-  return path.join(home, '.derivedoc', 'workspaces.json');
+  const configHome = process.env['XDG_CONFIG_HOME'] ?? path.join(os.homedir(), '.config');
+  return path.join(configHome, 'derivedoc', 'workspaces.json');
+}
+
+/**
+ * 早期版本把注册表放在 `~/.derivedoc/` 里，而这个名字正是项目标记——家目录因此被当成
+ * 项目根。这里只在读的时候兼容旧位置，写一律写新位置，下一次注册就完成搬家。
+ */
+function legacyRegistryFile(): string {
+  return path.join(os.homedir(), '.derivedoc', 'workspaces.json');
 }
 
 /** 工作区短 id：路径的可读后缀 + 稳定哈希，避免在 URL 里塞绝对路径。 */
@@ -58,7 +66,11 @@ export async function listWorkspaces(): Promise<WorkspaceRef[]> {
   try {
     raw = await fs.readFile(registryFile(), 'utf8');
   } catch {
-    return [];
+    try {
+      raw = await fs.readFile(legacyRegistryFile(), 'utf8');
+    } catch {
+      return [];
+    }
   }
 
   let parsed: unknown;

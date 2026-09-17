@@ -178,6 +178,7 @@ function Workspace() {
   const [doc, setDoc] = useState<Doc>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [incoming, setIncoming] = useState<Incoming>();
+  const [showIncoming, setShowIncoming] = useState(false);
   const [backlinks, setBacklinks] = useState<DocMeta[]>([]);
   const [filter, setFilter] = useState('');
   const [creating, setCreating] = useState<DocKind>();
@@ -203,15 +204,17 @@ function Workspace() {
   const [searchParams] = useSearchParams();
   const selected = params['*'] ? decodeURIComponent(params['*']) : undefined;
   const gitOpen = pathname.startsWith('/changes');
-  const diffMode: 'file' | 'incoming' | undefined = incoming
-    ? 'incoming'
-    : searchParams.get('diff') === '1'
-      ? 'file'
-      : undefined;
+  const diffMode: 'file' | 'incoming' | undefined =
+    incoming && showIncoming
+      ? 'incoming'
+      : searchParams.get('diff') === '1'
+        ? 'file'
+        : undefined;
 
   const openDoc = useCallback(
     (id: string, options: {diff?: boolean} = {}) => {
       setIncoming(undefined);
+      setShowIncoming(false);
       navigate(`/d/${id}${options.diff ? '?diff=1' : ''}`);
     },
     [navigate],
@@ -289,6 +292,7 @@ function Workspace() {
     const payload = (await response.json()) as Doc;
     setDoc(payload);
     setIncoming(undefined);
+    setShowIncoming(false);
     setDrafts(current => {
       const next = {...current};
       delete next[id];
@@ -548,7 +552,10 @@ function Workspace() {
       }
 
       if (event.key === 'Escape') {
-        setIncoming(undefined);
+        if (showIncoming) {
+          setShowIncoming(false);
+          return;
+        }
 
         if (gitOpen) {
           if (selected) {
@@ -1150,10 +1157,10 @@ function Workspace() {
               <div className="banner">
                 <span>磁盘上出现了新版本。</span>
                 <button
-                  onClick={() => setIncoming(current => (current ? undefined : incoming))}
+                  onClick={() => setShowIncoming(value => !value)}
                   type="button"
                 >
-                  看差异
+                  {showIncoming ? '回到草稿' : '看差异'}
                 </button>
                 <button
                   onClick={() => {
@@ -1164,6 +1171,7 @@ function Workspace() {
                     });
                     setDoc({...doc, body: incoming.body, revision: incoming.revision});
                     setIncoming(undefined);
+                    setShowIncoming(false);
                     setStatus('已载入磁盘版本，草稿丢弃');
                   }}
                   type="button"

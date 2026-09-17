@@ -56,6 +56,7 @@ const HELP = `derivedoc — source 沉淀决定，derived 承载方案
   dd [<项目根>] write <id>                   整篇写入，内容从 stdin 或 --content 读
   dd [<项目根>] append <id>                  追加到文末，内容从 stdin 或 --content 读
   dd [<项目根>] rm <id>                      删除文档
+  dd [<项目根>] selection                    打印界面上选中的那段（agent 拿它当上下文）
 
 工作区
   项目根放 .derivedoc/（运行数据，也是 git 作用域），文档目录放 source/ 与 derived/。

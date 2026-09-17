@@ -8,6 +8,7 @@ import {Hono, type Context} from 'hono';
 import {DocStoreError, isDocStoreError} from '../core/errors.ts';
 import {readConversations} from '../core/conversations.ts';
 import {describeWorkspace} from '../core/project.ts';
+import {clearSelection, readSelection, writeSelection} from '../core/selection.ts';
 import {
   gitCommit,
   gitDiff,
@@ -295,6 +296,45 @@ export function createApp(hub: WorkspaceHub): Hono {
       }
 
       return c.json({docs: view.store.backlinks(id)});
+    }),
+  );
+
+  /** 界面里选中的一段：agent 之后用 `dd selection` 读的就是它。 */
+  app.get('/api/selection', c =>
+    withStore(c, async view => c.json({selection: (await readSelection(view.ref.root)) ?? null})),
+  );
+
+  app.put('/api/selection', c =>
+    withStore(c, async view => {
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const doc = typeof body['doc'] === 'string' ? body['doc'] : '';
+      const quote = typeof body['quote'] === 'string' ? body['quote'] : '';
+
+      if (!doc || !quote.trim()) {
+        return c.json({error: {code: 'invalid_content', message: '缺少 doc 或 quote'}}, 400);
+      }
+
+      const line = (value: unknown) =>
+        typeof value === 'number' && Number.isFinite(value) ? Math.max(1, Math.round(value)) : 1;
+      const selection = {
+        doc,
+        from: line(body['from']),
+        to: line(body['to']),
+        quote,
+        ...(typeof body['revision'] === 'string' ? {revision: body['revision']} : {}),
+        at: new Date().toISOString(),
+        channel: 'web',
+      };
+
+      await writeSelection(view.ref.root, selection);
+      return c.json({selection});
+    }),
+  );
+
+  app.delete('/api/selection', c =>
+    withStore(c, async view => {
+      await clearSelection(view.ref.root);
+      return c.json({selection: null});
     }),
   );
 

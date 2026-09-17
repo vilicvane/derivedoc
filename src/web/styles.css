@@ -23,6 +23,8 @@
   --warn-soft: #f6ecda;
   --danger: #a32b1e;
   --danger-soft: #f6e5e1;
+  --pick-bg: #b23a1a;
+  --pick-fg: #fffdf9;
   --serif: 'Iowan Old Style', Georgia, 'Songti SC', 'Noto Serif SC', 'Source Han Serif SC',
     'Times New Roman', serif;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
@@ -53,6 +55,8 @@
     --warn-soft: #2b2418;
     --danger: #e8896a;
     --danger-soft: #2e1d18;
+    --pick-bg: #a8452a;
+    --pick-fg: #fffdf9;
     color-scheme: dark;
   }
 }
@@ -829,6 +833,29 @@ textarea {
   flex-direction: column;
   min-height: 0;
   padding: 1.1rem 1.4rem 1.25rem;
+  position: relative;
+}
+
+/* 选中提示：Monaco 的 content widget，挂在选区开头正上方，实色底白字。
+   Monaco 会给 widget 加 inline 的 display:block，所以这里按块级容器 + 行内子元素写。 */
+.pick-badge {
+  animation: switcher-in 140ms var(--ease);
+  background: var(--pick-bg);
+  border-radius: 5px;
+  box-shadow: 0 8px 20px -14px rgb(38 28 16 / 70%);
+  color: var(--pick-fg);
+  font-size: 0.66rem;
+  line-height: 1.2;
+  margin: 0 0 0.25rem;
+  padding: 0.2rem 0.4rem;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.pick-label {
+  color: var(--pick-fg);
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .main header,
@@ -1060,6 +1087,7 @@ textarea {
   margin-top: 0.85rem;
   min-height: 0;
   overflow: hidden;
+  position: relative;
 }
 
 .editor-caption {

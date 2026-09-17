@@ -6,6 +6,7 @@ import {
   Columns2,
   GitCommitHorizontal,
   Plus,
+  Quote,
   RotateCw,
   Trash2,
   X,
@@ -24,7 +25,7 @@ import {
 import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/diff.ts';
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
-import {MarkdownDiff, MarkdownEditor} from './editors.tsx';
+import {MarkdownDiff, MarkdownEditor, type Pick} from './editors.tsx';
 
 const markdown = new MarkdownIt({html: false, linkify: true});
 
@@ -383,6 +384,55 @@ function Workspace() {
 
   const draft = selected ? drafts[selected] ?? doc?.body ?? '' : '';
   const dirty = doc !== undefined && draft !== doc.body;
+
+  // 选中一段就记下来：agent 用 `dd selection` 读到的就是它。
+  const pickTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pickSet = useRef(false);
+  const recordPick = useCallback(
+    (pick: Pick | undefined) => {
+      // 选区收起来就把记下的撤掉：没有提示的选区留在那儿，agent 与用户看到的就对不上了。
+      if (!pick) {
+        clearTimeout(pickTimer.current);
+
+        if (pickSet.current) {
+          pickSet.current = false;
+          void fetch(`/api/selection?${wsQuery()}`, {method: 'DELETE'}).catch(() => undefined);
+        }
+
+        return;
+      }
+
+      pickSet.current = true;
+      clearTimeout(pickTimer.current);
+      pickTimer.current = setTimeout(() => {
+        void (async () => {
+          // 审阅页没有路由里的文档 id，选的是当前那篇 diff。
+          const id = gitOpen ? gitFile?.replace(/\.md$/i, '') : selected;
+
+          if (!id) {
+            return;
+          }
+
+          const response = await fetch(`/api/selection?${wsQuery()}`, {
+            method: 'PUT',
+            headers: {'content-type': 'application/json'},
+            body: JSON.stringify({
+              doc: id,
+              from: pick.from,
+              to: pick.to,
+              quote: pick.text,
+              ...(doc?.id === id ? {revision: doc.revision} : {}),
+            }),
+          }).catch(() => undefined);
+
+          if (!response?.ok) {
+            return;
+          }
+        })();
+      }, 300);
+    },
+    [doc, gitFile, gitOpen, selected, wsQuery],
+  );
 
   const stateRef = useRef({doc, draft, selected});
   const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
@@ -1529,6 +1579,7 @@ function Workspace() {
                       <MarkdownDiff
                         modified={gitSides.modified}
                         modifiedLabel="工作区"
+                        onPick={gitFile ? recordPick : undefined}
                         original={gitSides.original}
                         originalLabel="已提交版本"
                       />
@@ -1727,6 +1778,7 @@ function Workspace() {
                 </div>
                 <MarkdownDiff
                   modified={diff.modified}
+                  onPick={recordPick}
                   original={diff.original}
                   originalLabel="原内容"
                   modifiedLabel="新内容"
@@ -1736,6 +1788,7 @@ function Workspace() {
               <MarkdownEditor
                 autoFocus={focusEditorRef.current}
                 onChange={value => setDrafts(current => ({...current, [doc.id]: value}))}
+                onPick={recordPick}
                 value={draft}
               />
             )}

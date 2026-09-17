@@ -1,5 +1,5 @@
 import {DiffEditor, Editor, loader} from '@monaco-editor/react';
-import {useEffect, useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import editorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 // 只引编辑器核心 + markdown 高亮，不引整套语言与 LSP：dev 的依赖预打包和线上包体积
 // 都会小一个量级。
@@ -121,13 +121,101 @@ const EDITOR_OPTIONS = {
   tabSize: 2,
 };
 
+export interface Pick {
+  from: number;
+  to: number;
+  text: string;
+}
+
+const PICK_LABEL = '已选中，agent 可读';
+
+/** 选区上方的小标：说明这段已经交给 agent 了。 */
+function createPickBadge(): HTMLElement {
+  const dom = document.createElement('div');
+  dom.className = 'pick-badge';
+
+  const label = document.createElement('span');
+  label.className = 'pick-label';
+  label.textContent = PICK_LABEL;
+
+  dom.append(label);
+  return dom;
+}
+
+/**
+ * 选中非空就回报（行号 1 起、含两端），并在选区开头**上方**挂一条提示——用 Monaco 的 content
+ * widget，位置和滚动都由编辑器管。拖拽过程中先不显示：widget 压在正文上会挡住正在拉的选区。
+ */
+function watchSelection(
+  editor: monaco.editor.ICodeEditor,
+  report: (pick: Pick | undefined) => void,
+): void {
+  let position: monaco.IPosition | undefined;
+  let dragging = false;
+  const dom = createPickBadge();
+  const widget: monaco.editor.IContentWidget = {
+    allowEditorOverflow: true,
+    getId: () => 'derivedoc.pick',
+    getDomNode: () => dom,
+    getPosition: () =>
+      position
+        ? {
+            position,
+            preference: [
+              monaco.editor.ContentWidgetPositionPreference.ABOVE,
+              monaco.editor.ContentWidgetPositionPreference.BELOW,
+            ],
+          }
+        : null,
+  };
+
+  editor.addContentWidget(widget);
+
+  const hidePosition = () => {
+    position = undefined;
+    editor.layoutContentWidget(widget);
+  };
+
+  const refresh = (place: boolean) => {
+    const model = editor.getModel();
+    const selection = editor.getSelection();
+    const text = model && selection && !selection.isEmpty() ? model.getValueInRange(selection) : '';
+
+    if (!selection || !text.trim()) {
+      hidePosition();
+      report(undefined);
+      return;
+    }
+
+    report({from: selection.startLineNumber, to: selection.endLineNumber, text});
+
+    if (place) {
+      position = selection.getStartPosition();
+      editor.layoutContentWidget(widget);
+    }
+  };
+
+  // 鼠标按下先把提示收起来，松手之后再贴出来：否则它正好压住正在拉的选区。
+  editor.onMouseDown(() => {
+    dragging = true;
+    hidePosition();
+  });
+  editor.onMouseUp(() => {
+    dragging = false;
+    refresh(true);
+  });
+  editor.onDidChangeCursorSelection(() => refresh(!dragging));
+}
+
 export function MarkdownEditor({
   value,
   onChange,
+  onPick,
   autoFocus = false,
 }: {
   value: string;
   onChange: (value: string) => void;
+  onPick?: (pick: Pick | undefined) => void;
   autoFocus?: boolean;
 }) {
   const theme = useTheme();
@@ -146,6 +234,10 @@ export function MarkdownEditor({
           if (autoFocus) {
             editor.focus();
           }
+
+          if (onPick) {
+            watchSelection(editor, onPick);
+          }
         }}
         options={EDITOR_OPTIONS}
         theme={theme}
@@ -160,11 +252,13 @@ export function MarkdownDiff({
   modified,
   originalLabel,
   modifiedLabel,
+  onPick,
 }: {
   original: string;
   modified: string;
   originalLabel?: string;
   modifiedLabel?: string;
+  onPick?: (pick: Pick | undefined) => void;
 }) {
   const theme = useTheme();
 
@@ -178,6 +272,12 @@ export function MarkdownDiff({
           </div>
         }
         modified={modified}
+        onMount={editor => {
+          if (onPick) {
+            // 右侧是工作区内容，用户能选的就是它。
+            watchSelection(editor.getModifiedEditor(), onPick);
+          }
+        }}
         options={{
           ...EDITOR_OPTIONS,
           readOnly: true,

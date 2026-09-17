@@ -12,6 +12,7 @@ import {
   type WorkspacePaths,
 } from '../core/project.ts';
 import {DocStore} from '../core/store.ts';
+import {readSelection} from '../core/selection.ts';
 import type {DocKind} from '../core/types.ts';
 import {CliError} from './args.ts';
 
@@ -23,7 +24,16 @@ export interface CommandOptions {
 }
 
 /** 子命令名。第一位 positional 命中这些名字时按「在 cwd 里跑子命令」解释。 */
-export const COMMANDS = new Set(['root', 'ls', 'read', 'stat', 'write', 'append', 'rm']);
+export const COMMANDS = new Set([
+  'root',
+  'ls',
+  'read',
+  'stat',
+  'write',
+  'append',
+  'rm',
+  'selection',
+]);
 
 /** agent 与人都用这几个子命令读写文档，服务不必启动。 */
 export async function runCommand(
@@ -48,6 +58,8 @@ export async function runCommand(
       return appendDoc(projectDir, docDir, takeId(rest, 'append'), options);
     case 'rm':
       return removeDoc(projectDir, docDir, takeId(rest, 'rm').id, options);
+    case 'selection':
+      return printSelection(projectDir, docDir, options);
     default:
       throw new CliError(
         `未知子命令：${command}（可用：${[...COMMANDS].join('、')}；省略子命令则启动服务）`,
@@ -306,6 +318,42 @@ async function removeDoc(
   } finally {
     await store.close();
   }
+}
+
+/** 界面上选中的那段文字：agent 读它当上下文。 */
+async function printSelection(
+  projectDir: string,
+  docDir: string | undefined,
+  options: CommandOptions,
+): Promise<void> {
+  const workspace = await commandWorkspace(projectDir, docDir);
+
+  if (!workspace) {
+    throw new CliError(await readOnlyHint(projectDir, docDir));
+  }
+
+  const selection = await readSelection(workspace.root);
+
+  if (!selection) {
+    if (options.json) {
+      printJson({selection: null});
+    } else {
+      process.stderr.write('现在没有选中内容：在界面上选一段就会记下来\n');
+    }
+
+    process.exitCode = 1;
+    return;
+  }
+
+  if (options.json) {
+    printJson(selection);
+    return;
+  }
+
+  const lines = selection.from === selection.to ? `${selection.from}` : `${selection.from}–${selection.to}`;
+  process.stdout.write(
+    `${selection.doc}\t第 ${lines} 行${selection.revision ? `\trevision ${selection.revision}` : ''}\n\n${selection.quote}\n`,
+  );
 }
 
 function printWriteResult(

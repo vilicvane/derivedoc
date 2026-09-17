@@ -243,6 +243,7 @@ export function DocPane({
           </div>
           <MarkdownDiff
             modified={diff.modified}
+            modelKey={modelKey}
             onChange={changeDraft}
             onPick={onPick}
             original={diff.original}

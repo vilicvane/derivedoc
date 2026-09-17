@@ -320,11 +320,17 @@ export function MarkdownEditor({
 }
 
 export function MarkdownDiff({
+  modelKey,
   original,
   modified,
   onPick,
   onChange,
 }: {
+  /**
+   * 正文那侧的 model 名：给了就和编辑态共用同一篇的 model（撤销栈也是同一个）。
+   * 审阅页只是看 diff，没有对应的文档页，不给就自己建一个用完即弃的。
+   */
+  modelKey?: string;
   original: string;
   modified: string;
   onPick?: (pick: Pick | undefined) => void;
@@ -334,17 +340,34 @@ export function MarkdownDiff({
   const theme = useTheme();
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<monaco.editor.IStandaloneDiffEditor>(undefined);
-  const models = useRef<monaco.editor.ITextModel[]>([]);
+  /** 基准那侧的 model（暂存区内容），跟着 original 走。 */
+  const base = useRef<monaco.editor.ITextModel>(undefined);
+  const attached = useRef<string>(undefined);
   const pick = useRef(onPick);
   const change = useRef(onChange);
+  const latest = useRef({modelKey, original, modified});
   pick.current = onPick;
   change.current = onChange;
+  latest.current = {modelKey, original, modified};
 
   useEffect(() => {
     const container = host.current;
 
     if (!container) {
       return;
+    }
+
+    const key = latest.current.modelKey;
+    const baseModel = monaco.editor.createModel(latest.current.original, 'markdown');
+    // 没有 modelKey 就是只读的独立 diff，正文那侧自己建、自己收拾。
+    const draftModel = key
+      ? acquireModel(key, latest.current.modified)
+      : monaco.editor.createModel(latest.current.modified, 'markdown');
+    base.current = baseModel;
+
+    if (key) {
+      attached.current = key;
+      attachModel(key);
     }
 
     const instance = monaco.editor.createDiffEditor(container, {
@@ -356,6 +379,7 @@ export function MarkdownDiff({
       renderSideBySide: true,
       theme: currentTheme(),
     });
+    instance.setModel({original: baseModel, modified: draftModel});
     const subscription = instance.getModifiedEditor().onDidChangeModelContent(() =>
       change.current?.(instance.getModifiedEditor().getValue()),
     );
@@ -367,35 +391,71 @@ export function MarkdownDiff({
     return () => {
       subscription.dispose();
       instance.dispose();
+      baseModel.dispose();
+      base.current = undefined;
 
-      for (const model of models.current) {
-        model.dispose();
+      if (key) {
+        detachModel(key);
+      } else {
+        draftModel.dispose();
       }
 
-      models.current = [];
+      attached.current = undefined;
       editor.current = undefined;
     };
   }, []);
 
-  // 两侧内容变了就换模型，旧的手动释放。
+  // 基准那侧换了内容（暂存区动过）就换掉它；正文那侧是这篇的 model，不跟着动。
   useEffect(() => {
     const instance = editor.current;
-    const current = instance?.getModel();
+    const previous = base.current;
 
-    // 自己敲出来的改动不要再回灌一遍模型，否则光标和撤销栈都会断。
-    if (!instance || (current?.original.getValue() === original && current.modified.getValue() === modified)) {
+    if (!instance || !previous || previous.getValue() === original) {
       return;
     }
 
-    const originalModel = monaco.editor.createModel(original, 'markdown');
-    const modifiedModel = monaco.editor.createModel(modified, 'markdown');
-    const previous = instance.getModel();
+    const modifiedModel = instance.getModel()?.modified;
 
-    instance.setModel({original: originalModel, modified: modifiedModel});
-    previous?.original.dispose();
-    previous?.modified.dispose();
-    models.current = [originalModel, modifiedModel];
-  }, [original, modified]);
+    if (!modifiedModel) {
+      return;
+    }
+
+    const next = monaco.editor.createModel(original, 'markdown');
+
+    base.current = next;
+    instance.setModel({original: next, modified: modifiedModel});
+    previous.dispose();
+  }, [original]);
+
+  // 换文档：正文那侧换成那篇的 model。只读的独立 diff（没有 modelKey）不换。
+  useEffect(() => {
+    const instance = editor.current;
+    const originalModel = instance?.getModel()?.original;
+
+    if (!instance || !originalModel || !modelKey || attached.current === modelKey) {
+      return;
+    }
+
+    const previous = attached.current;
+    const model = acquireModel(modelKey, latest.current.modified);
+
+    attached.current = modelKey;
+    attachModel(modelKey);
+    instance.setModel({original: originalModel, modified: model});
+
+    if (previous !== undefined && previous !== modelKey) {
+      detachModel(previous);
+    }
+  }, [modelKey]);
+
+  // 正文被换掉（用磁盘版本）时整段替换：和编辑态共用同一份撤销栈，⌘Z 能撤回来。
+  useEffect(() => {
+    const model = editor.current?.getModel()?.modified;
+
+    if (model && model.getValue() !== modified) {
+      syncModel(model, modified);
+    }
+  }, [modified]);
 
   useEffect(() => {
     monaco.editor.setTheme(theme);

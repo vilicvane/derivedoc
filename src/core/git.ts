@@ -183,6 +183,54 @@ export async function gitShow(root: string, file: string, rev = 'HEAD'): Promise
   return result.code === 0 ? result.stdout : '';
 }
 
+/** 暂存指定范围（缺省是两层文档整体）。 */
+export async function gitStage(root: string, file?: string): Promise<void> {
+  const targets = file ? [file] : await existingScopes(root);
+
+  if (targets.length === 0) {
+    return;
+  }
+
+  const result = await run(root, ['add', '--', ...targets]);
+
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || 'git add 失败');
+  }
+}
+
+/** 取消暂存（保留工作区改动）。 */
+export async function gitUnstage(root: string, file?: string): Promise<void> {
+  const targets = file ? [file] : await existingScopes(root);
+
+  if (targets.length === 0) {
+    return;
+  }
+
+  const result = await run(root, ['restore', '--staged', '--', ...targets]);
+
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || 'git restore --staged 失败');
+  }
+}
+
+/** 只把真正有内容的层交给 git：空目录会让 git 报 pathspec 找不到。 */
+async function existingScopes(root: string): Promise<string[]> {
+  const [status, prefix] = await Promise.all([
+    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...SCOPES]),
+    repoPrefix(root),
+  ]);
+  const scopes = new Set(
+    parsePorcelain(status.stdout, prefix).map(change => change.path.split('/')[0] ?? ''),
+  );
+
+  return SCOPES.filter(scope => scopes.has(scope));
+}
+
+/** 暂存区里的文件内容；没有暂存过时返回空串。 */
+export async function gitShowStaged(root: string, file: string): Promise<string> {
+  return gitShow(root, file, ':0');
+}
+
 export async function hasCommits(root: string): Promise<boolean> {
   return (await run(root, ['rev-parse', '--verify', '--quiet', 'HEAD'])).code === 0;
 }
@@ -196,34 +244,26 @@ export async function gitCommit(root: string, message: string): Promise<GitCommi
 
   // 只处理真正有改动的层：git commit 的 pathspec 必须匹配已知路径，空目录会直接报错。
   const [status, prefix] = await Promise.all([
-    run(root, [
-      'status',
-      '--porcelain',
-      '--untracked-files=all',
-      '--',
-      ...SCOPES,
-    ]),
+    run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...SCOPES]),
     repoPrefix(root),
   ]);
+  const staged = parsePorcelain(status.stdout, prefix).filter(
+    change => change.index !== ' ' && change.index !== '?',
+  );
+
+  if (staged.length === 0) {
+    return {ok: false, error: '还没有暂存任何文档改动'};
+  }
+
   const scopes = [
     ...new Set(
-      parsePorcelain(status.stdout, prefix)
+      staged
         .map(change => change.path.split('/')[0] ?? '')
         .filter(scope => (SCOPES as readonly string[]).includes(scope)),
     ),
   ];
 
-  if (scopes.length === 0) {
-    return {ok: false, error: '没有需要提交的文档改动'};
-  }
-
-  const staged = await run(root, ['add', '--', ...scopes]);
-
-  if (staged.code !== 0) {
-    return {ok: false, error: staged.stderr.trim() || 'git add 失败'};
-  }
-
-  // 只提交这两层文档，不动用户其它的暂存内容。
+  // 只提交已经暂存的内容：不替用户 add，交什么由 stage 决定。
   const commit = await run(root, ['commit', '-m', trimmed, '--', ...scopes]);
 
   if (commit.code !== 0) {

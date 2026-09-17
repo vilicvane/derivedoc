@@ -6,7 +6,17 @@ import path from 'node:path';
 import {promisify} from 'node:util';
 import test from 'node:test';
 
-import {gitCommit, gitDiff, gitShow, gitStatus, parsePorcelain, writeMessage} from '../src/core/git.ts';
+import {
+  gitCommit,
+  gitDiff,
+  gitShow,
+  gitShowStaged,
+  gitStage,
+  gitStatus,
+  gitUnstage,
+  parsePorcelain,
+  writeMessage,
+} from '../src/core/git.ts';
 import {initProject} from '../src/core/project.ts';
 import {DocStore} from '../src/core/store.ts';
 
@@ -66,6 +76,10 @@ test('改动后能拿到 diff，提交后工作区干净', async () => {
     const message = (await gitStatus(dir)).message ?? '';
     assert.equal(message.trim(), '记录第一条决定');
 
+    // 先暂存再提交：提交只带已暂存的内容。
+    await gitStage(dir, 'source/decisions.md');
+    assert.match(await gitShowStaged(dir, 'source/decisions.md'), /第一条决定/);
+
     const committed = await gitCommit(dir, message);
     assert.equal(committed.ok, true);
     assert.ok(committed.sha);
@@ -92,6 +106,7 @@ test('提交只带上两层文档，不动其它暂存内容', async () => {
 
   try {
     await store.write('source/decisions', '# 决定\n\n只提交文档。\n');
+    await gitStage(dir);
     const result = await gitCommit(dir, '只提交文档');
     assert.equal(result.ok, true);
 
@@ -107,6 +122,35 @@ test('空 message 拒绝提交', async () => {
   const result = await gitCommit(dir, '   ');
   assert.equal(result.ok, false);
   assert.match(result.error ?? '', /空的/);
+});
+
+test('没暂存就不提交；暂存后可以取消暂存', async () => {
+  const dir = await createRepo();
+  const store = await DocStore.open(dir, {watch: false});
+
+  try {
+    await store.write('source/decisions', '# 决定\n\n还没暂存。\n');
+
+    const refused = await gitCommit(dir, '未暂存');
+    assert.equal(refused.ok, false);
+    assert.match(refused.error ?? '', /暂存/);
+
+    await gitStage(dir);
+    assert.deepEqual(
+      (await gitStatus(dir)).changes.map(change => change.index),
+      ['A'],
+    );
+    assert.match(await gitShowStaged(dir, 'source/decisions.md'), /还没暂存/);
+
+    await gitUnstage(dir);
+    assert.equal(await gitShowStaged(dir, 'source/decisions.md'), '');
+    assert.deepEqual(
+      (await gitStatus(dir)).changes.map(change => change.path),
+      ['source/decisions.md'],
+    );
+  } finally {
+    await store.close();
+  }
 });
 
 test('还没有任何提交时也能看 diff', async () => {

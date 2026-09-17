@@ -71,6 +71,21 @@ interface Toast {
   text: string;
 }
 
+interface ConversationRecord {
+  type: 'message';
+  at: string;
+  sessionId: string;
+  turnId?: string;
+  channel: string;
+  text: string;
+  captures: Array<{
+    changed: string[];
+    thinking?: string;
+    elapsedMs: number;
+    code: number;
+  }>;
+}
+
 interface SearchHit extends DocMeta {
   snippet: string;
 }
@@ -163,6 +178,17 @@ function fileName(id: string): string {
   return `${id.split('/').pop() ?? id}.md`;
 }
 
+function formatTime(iso: string): string {
+  const date = new Date(iso);
+
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function App() {
   return (
     <Routes>
@@ -198,6 +224,8 @@ function Workspace() {
   const [gitMessage, setGitMessage] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
   const [workspace, setWorkspace] = useState<{root: string; name: string}>();
+  const [provenance, setProvenance] = useState<ConversationRecord[]>([]);
+  const [showProvenance, setShowProvenance] = useState(false);
 
   // 路由即状态：/d/<id> 看文档，?diff=1 看改动，/changes 看提交面板。
   const navigate = useNavigate();
@@ -253,6 +281,11 @@ function Workspace() {
     () => new Map((git?.changes ?? []).map(change => [change.path, change])),
     [git],
   );
+
+  /** 已暂存的文件数：提交只带这些。 */
+  const stagedCount = (git?.changes ?? []).filter(
+    change => change.index !== ' ' && change.index !== '?',
+  ).length;
 
   /** 路由里的 id 不在文档列表里：多半是失效链接。 */
   const missingDoc = Boolean(selected) && docs.length > 0 && !docs.some(item => item.id === selected);
@@ -392,6 +425,35 @@ function Workspace() {
     void loadBacklinks(selected);
   }, [selected, loadDoc, loadBacklinks]);
 
+  // 这篇文档是被哪几段对话改出来的。
+  useEffect(() => {
+    if (!selected) {
+      setProvenance([]);
+      return;
+    }
+
+    let cancelled = false;
+    setShowProvenance(false);
+
+    void (async () => {
+      const response = await fetch(`/api/conversations?doc=${encodeURIComponent(selected)}`);
+
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = (await response.json()) as {conversations: ConversationRecord[]};
+
+      if (!cancelled) {
+        setProvenance(payload.conversations);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
   // 单个文档的 diff：以已提交版本为基准，对比当前编辑器内容。
   useEffect(() => {
     if (diffMode !== 'file' || !doc) {
@@ -401,7 +463,9 @@ function Workspace() {
     let cancelled = false;
 
     void (async () => {
-      const response = await fetch(`/api/git/show?path=${encodeURIComponent(doc.relPath)}`);
+      const response = await fetch(
+        `/api/git/show?path=${encodeURIComponent(doc.relPath)}&base=index`,
+      );
 
       if (!response.ok) {
         if (!cancelled) {
@@ -714,6 +778,26 @@ function Workspace() {
     } else {
       navigate('/');
     }
+  };
+
+  const stage = async (path?: string, unstage = false) => {
+    setGitBusy(true);
+
+    const response = await fetch('/api/git/stage', {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({...(path ? {path} : {}), ...(unstage ? {unstage: true} : {})}),
+    });
+
+    setGitBusy(false);
+
+    if (!response.ok) {
+      setStatus(unstage ? '取消暂存失败' : '暂存失败');
+      return;
+    }
+
+    setGit((await response.json()) as GitStatus);
+    await loadGitDiff(gitFile);
   };
 
   const commit = async () => {
@@ -1030,6 +1114,11 @@ function Workspace() {
                 )}
               </div>
               <div className="actions">
+                {git && git.changes.length > 0 && (
+                  <button onClick={() => void stage()} title="把两层文档的改动全部暂存" type="button">
+                    全部暂存
+                  </button>
+                )}
                 <button
                   onClick={() => (selected ? openDoc(selected) : navigate('/'))}
                   title="回到文档"
@@ -1058,20 +1147,43 @@ function Workspace() {
                     </li>
                     {git.changes.map(change => (
                       <li key={change.path}>
-                        <button
-                          className={gitFile === change.path ? 'active' : ''}
-                          onClick={() => setGitFile(change.path)}
-                          type="button"
-                        >
-                          <span className="badge">{statusLabel(change)}</span>
-                          <span className="path">{change.path}</span>
-                          {change.added !== undefined && (
-                            <span className="stat">
-                              <span className="add">+{change.added}</span>{' '}
-                              <span className="remove">−{change.removed ?? 0}</span>
+                        <div className={`git-row${gitFile === change.path ? ' active' : ''}`}>
+                          <button
+                            className="git-pick"
+                            onClick={() => setGitFile(change.path)}
+                            type="button"
+                          >
+                            <span className={`badge${change.index !== ' ' && change.index !== '?' ? ' staged' : ''}`}>
+                              {statusLabel(change)}
                             </span>
+                            <span className="path">{change.path}</span>
+                            {change.added !== undefined && (
+                              <span className="stat">
+                                <span className="add">+{change.added}</span>{' '}
+                                <span className="remove">−{change.removed ?? 0}</span>
+                              </span>
+                            )}
+                          </button>
+                          {change.index !== ' ' && change.index !== '?' ? (
+                            <button
+                              className="git-stage"
+                              onClick={() => void stage(change.path, true)}
+                              title="取消暂存"
+                              type="button"
+                            >
+                              取消暂存
+                            </button>
+                          ) : (
+                            <button
+                              className="git-stage"
+                              onClick={() => void stage(change.path)}
+                              title="暂存这个文件"
+                              type="button"
+                            >
+                              暂存
+                            </button>
                           )}
-                        </button>
+                        </div>
                       </li>
                     ))}
                     {git.changes.length === 0 && <li className="empty">没有未提交的文档改动</li>}
@@ -1106,11 +1218,12 @@ function Workspace() {
                   />
                   <button
                     className="primary"
-                    disabled={gitBusy || git.changes.length === 0}
+                    disabled={gitBusy || stagedCount === 0}
                     onClick={() => void commit()}
+                    title={stagedCount === 0 ? '先暂存要提交的改动' : '提交已暂存的内容'}
                     type="button"
                   >
-                    提交
+                    {stagedCount === 0 ? '先暂存' : `提交 ${stagedCount} 个`}
                   </button>
                 </div>
               </>
@@ -1231,7 +1344,36 @@ function Workspace() {
                   {item.title}
                 </button>
               ))}
+              {provenance.length > 0 && (
+                <>
+                  <span className="label">来源</span>
+                  <button onClick={() => setShowProvenance(value => !value)} type="button">
+                    {showProvenance ? '收起' : `${provenance.length} 段对话`}
+                  </button>
+                </>
+              )}
             </div>
+
+            {showProvenance && (
+              <ol className="provenance">
+                {provenance.map((record, index) => (
+                  <li key={`${record.sessionId}-${record.at}`}>
+                    <div className="provenance-head">
+                      <span className="when">{formatTime(record.at)}</span>
+                      <span className="channel">{record.channel}</span>
+                      <span className="turn">{record.turnId?.slice(0, 8) ?? record.sessionId.slice(0, 8)}</span>
+                    </div>
+                    <p className="said">{record.text}</p>
+                    <p className="meta">
+                      {record.captures.some(capture => capture.thinking)
+                        ? `思考：${record.captures.find(capture => capture.thinking)?.thinking}`
+                        : '没有留下思考产物'}
+                    </p>
+                    {index === provenance.length - 1 && null}
+                  </li>
+                ))}
+              </ol>
+            )}
 
             {diff ? (
               <section className="diff">

@@ -8,7 +8,9 @@
 <项目>/
   source/        决定
   derived/       方案
-  .derivedoc/    本地数据（目前未使用）
+  .derivedoc/    本地运行数据
+    conversations/
+      <session-id>.jsonl  对话日志；每个会话一份，只追加不改写；供 source 决定追溯发言者与时间
 ```
 
 ## 标识与标题

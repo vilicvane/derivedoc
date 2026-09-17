@@ -5,7 +5,16 @@ import path from 'node:path';
 import {Hono, type Context} from 'hono';
 
 import {DocStoreError, isDocStoreError} from '../core/errors.ts';
-import {gitCommit, gitDiff, gitShow, gitStatus} from '../core/git.ts';
+import {readConversations} from '../core/conversations.ts';
+import {
+  gitCommit,
+  gitDiff,
+  gitShow,
+  gitShowStaged,
+  gitStage,
+  gitStatus,
+  gitUnstage,
+} from '../core/git.ts';
 import type {DocStore} from '../core/store.ts';
 import type {DocKind} from '../core/types.ts';
 import type {WorkspaceHub} from './hub.ts';
@@ -128,10 +137,39 @@ export function createApp(hub: WorkspaceHub): Hono {
     withStore(c, store => c.json({hits: store.search(c.req.query('q') ?? '')})),
   );
 
+  /** 对话记录（本地缓存）：可按文档过滤，看某篇是谁在什么对话里定下来的。 */
+  app.get('/api/conversations', c =>
+    withStore(c, async store => {
+      const doc = c.req.query('doc');
+      const limit = Number(c.req.query('limit') ?? 200);
+      const all = await readConversations(store.root);
+      const filtered = doc
+        ? all.filter(record => record.captures.some(capture => capture.changed.includes(doc)))
+        : all;
+
+      return c.json({conversations: filtered.slice(0, Number.isFinite(limit) ? limit : 200)});
+    }),
+  );
+
   app.get('/api/git/status', c => withStore(c, async store => c.json(await gitStatus(store.root))));
 
   app.get('/api/git/diff', c =>
     withStore(c, async store => c.json({diff: await gitDiff(store.root, c.req.query('path'))})),
+  );
+
+  app.post('/api/git/stage', c =>
+    withStore(c, async store => {
+      const body = (await c.req.json().catch(() => ({}))) as {path?: unknown; unstage?: unknown};
+      const file = typeof body.path === 'string' ? body.path : undefined;
+
+      if (body.unstage) {
+        await gitUnstage(store.root, file);
+      } else {
+        await gitStage(store.root, file);
+      }
+
+      return c.json(await gitStatus(store.root));
+    }),
   );
 
   app.get('/api/git/show', c =>
@@ -150,7 +188,10 @@ export function createApp(hub: WorkspaceHub): Hono {
       }
 
       const modified = await fsp.readFile(absolute, 'utf8').catch(() => '');
-      const original = await gitShow(store.root, file);
+      const original =
+        c.req.query('base') === 'index'
+          ? await gitShowStaged(store.root, file)
+          : await gitShow(store.root, file);
 
       if (!modified && !original) {
         return c.json({error: {code: 'not_found', message: `文件不存在：${file}`}}, 404);

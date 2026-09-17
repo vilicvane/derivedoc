@@ -39,6 +39,21 @@ if (process.env.DERIVEDOC_HOOK_PROBE) {
 const pendingDir = path.join(workspaceRoot, '.derivedoc', 'pending');
 await fs.mkdir(pendingDir, {recursive: true});
 
+const {appendConversation} = await import(
+  new URL('../../src/core/conversations.ts', import.meta.url)
+);
+const turnId = typeof payload.turn_id === 'string' ? payload.turn_id : undefined;
+
+// 先落用户原话：即便后面的捕获失败，这句话也不会丢。
+await appendConversation(workspaceRoot, sessionId, {
+  type: 'message',
+  at: new Date().toISOString(),
+  sessionId,
+  ...(turnId ? {turnId} : {}),
+  channel: 'codex',
+  text: prompt,
+});
+
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const outFile = path.join(pendingDir, `${stamp}-${payload.turn_id ?? 'turn'}.md`);
 const logFile = path.join(workspaceRoot, '.derivedoc', 'capture.log');
@@ -102,6 +117,15 @@ if (code !== 0 || !thinking) {
   emit(
     `derivedoc：这条消息的捕获没有产出（退出码 ${code}）。详情见 ${path.relative(workspaceRoot, logFile)}。`,
   );
+  await appendConversation(workspaceRoot, sessionId, {
+    type: 'capture',
+    at: new Date().toISOString(),
+    sessionId,
+    ...(turnId ? {turnId} : {}),
+    changed: [],
+    elapsedMs: elapsed,
+    code,
+  });
   process.exit(0);
 }
 
@@ -118,6 +142,17 @@ emit(
       : '本轮没有文档变更（这条消息没有产生需要沉淀的决定）。',
   ].join(''),
 );
+
+await appendConversation(workspaceRoot, sessionId, {
+  type: 'capture',
+  at: new Date().toISOString(),
+  sessionId,
+  ...(turnId ? {turnId} : {}),
+  changed,
+  thinking: path.relative(workspaceRoot, outFile),
+  elapsedMs: elapsed,
+  code,
+});
 
 process.exit(0);
 

@@ -101,6 +101,14 @@ export async function startServer(
   const wss = new WebSocketServer({server, path: '/ws'});
   const clients = new Set<import('ws').WebSocket>();
 
+  // 端口被占用时 http server 会重试下一个端口，wss 会把同一个错误再抛一次；
+  // 不接住它进程就直接崩了，顺延也就无从谈起。
+  wss.on('error', error => {
+    if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') {
+      process.stderr.write(`[ws] ${error.message}\n`);
+    }
+  });
+
   const broadcast = (payload: unknown) => {
     const message = JSON.stringify(payload);
 

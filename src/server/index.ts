@@ -5,7 +5,6 @@ import {getRequestListener} from '@hono/node-server';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {WebSocketServer} from 'ws';
 
-import type {DocStore} from '../core/store.ts';
 import {createApp} from './app.ts';
 import type {WorkspaceHub} from './hub.ts';
 import {createMcpServer} from './mcp.ts';

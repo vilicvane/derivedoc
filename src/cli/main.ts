@@ -12,10 +12,9 @@ import {
   type InitResult,
   type WorkspacePaths,
 } from '../core/project.ts';
-import type {DocStore} from '../core/store.ts';
 import type {WorkspaceHub} from '../server/hub.ts';
 import {CliError, parseArgs} from './args.ts';
-import {COMMANDS, missingWorkspaceHint, reportError, runCommand} from './commands.ts';
+import {COMMANDS, reportError, runCommand} from './commands.ts';
 
 const DEFAULT_PORT = 7788;
 

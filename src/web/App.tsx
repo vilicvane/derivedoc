@@ -1,4 +1,12 @@
 import MarkdownIt from 'markdown-it';
+import {
+  AlertTriangle,
+  Check,
+  Columns2,
+  GitCommitHorizontal,
+  RotateCw,
+  Trash2,
+} from 'lucide-react';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 
 import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/diff.ts';
@@ -24,6 +32,7 @@ interface DocMeta {
   id: string;
   kind: DocKind;
   title: string;
+  relPath: string;
   revision: string;
   updatedAt: string;
   links: string[];
@@ -45,6 +54,12 @@ interface Incoming {
   body: string;
 }
 
+interface Toast {
+  id: number;
+  kind: 'ok' | 'info' | 'warn' | 'error';
+  text: string;
+}
+
 interface SearchHit extends DocMeta {
   snippet: string;
 }
@@ -63,6 +78,70 @@ interface GitStatus {
   message?: string;
 }
 
+interface TreeNode {
+  name: string;
+  path: string;
+  kind: DocKind;
+  depth: number;
+  children: TreeNode[];
+  doc?: DocMeta;
+}
+
+function buildTree(docs: DocMeta[]): TreeNode[] {
+  const roots: TreeNode[] = [];
+  const nodes = new Map<string, TreeNode>();
+
+  for (const doc of [...docs].sort((a, b) => a.id.localeCompare(b.id))) {
+    const segments = doc.id.split('/');
+    let list = roots;
+    let prefix = '';
+
+    segments.forEach((segment, index) => {
+      prefix = prefix ? `${prefix}/${segment}` : segment;
+      let node = nodes.get(prefix);
+
+      if (!node) {
+        node = {name: segment, path: prefix, kind: doc.kind, depth: index, children: []};
+        nodes.set(prefix, node);
+        list.push(node);
+      }
+
+      if (index === segments.length - 1) {
+        node.doc = doc;
+      }
+
+      list = node.children;
+    });
+  }
+
+  // source 在前：界面主要给用户看，用户关心的是自己定下的东西。
+  const layerOrder: Record<DocKind, number> = {source: 0, derived: 1};
+  const sortNodes = (list: TreeNode[]): TreeNode[] =>
+    list.sort((a, b) => {
+      const layer = layerOrder[a.kind] - layerOrder[b.kind];
+
+      if (a.depth === 0 && layer !== 0) {
+        return layer;
+      }
+
+      return a.name.localeCompare(b.name);
+    });
+
+  sortNodes(roots);
+
+  for (const node of nodes.values()) {
+    if (node.children.length > 0) {
+      sortNodes(node.children);
+    }
+  }
+
+  return roots;
+}
+
+function fileName(id: string): string {
+  return `${id.split('/').pop() ?? id}.md`;
+}
+
 export function App() {
   const [docs, setDocs] = useState<DocMeta[]>([]);
   const [selected, setSelected] = useState<string>();
@@ -70,14 +149,15 @@ export function App() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [incoming, setIncoming] = useState<Incoming>();
   const [backlinks, setBacklinks] = useState<DocMeta[]>([]);
-  const [editing, setEditing] = useState(false);
-  const [status, setStatus] = useState('');
   const [filter, setFilter] = useState('');
   const [creating, setCreating] = useState<DocKind>();
   const [newId, setNewId] = useState('');
-  const [diffMode, setDiffMode] = useState<'mine' | 'incoming'>();
+  const [diffMode, setDiffMode] = useState<'file' | 'incoming'>();
+  const [fileDiff, setFileDiff] = useState<{original: string; modified: string}>();
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>();
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const [git, setGit] = useState<GitStatus>();
   const [gitOpen, setGitOpen] = useState(false);
   const [gitFile, setGitFile] = useState<string>();
@@ -92,6 +172,46 @@ export function App() {
   const stateRef = useRef({doc, draft, selected});
   const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
   stateRef.current = {doc, draft, selected};
+
+  const notify = useCallback((text: string) => {
+    if (!text) {
+      return;
+    }
+
+    const kind: Toast['kind'] = /失败|错误|无法|不在/.test(text)
+      ? 'error'
+      : /已保存|已提交|已删除|已载入|生效/.test(text)
+        ? 'ok'
+        : 'info';
+    const id = Date.now() + Math.random();
+
+    setToasts(current => [...current.slice(-2), {id, kind, text}]);
+    setTimeout(() => setToasts(current => current.filter(toast => toast.id !== id)), 3200);
+  }, []);
+
+  const setStatus = notify;
+
+  const changeByPath = useMemo(
+    () => new Map((git?.changes ?? []).map(change => [change.path, change])),
+    [git],
+  );
+
+  const tree = useMemo(() => buildTree(docs), [docs]);
+
+  const flatDocs = useMemo(() => {
+    const list: DocMeta[] = [];
+    const walk = (nodes: TreeNode[]): void => {
+      for (const node of nodes) {
+        if (node.doc) {
+          list.push(node.doc);
+        } else {
+          walk(node.children);
+        }
+      }
+    };
+    walk(tree);
+    return list;
+  }, [tree]);
 
   const loadDocs = useCallback(async () => {
     const response = await fetch('/api/docs');
@@ -185,18 +305,52 @@ export function App() {
     }
 
     setStatus('');
+    setDiffMode(undefined);
     void loadDoc(selected);
     void loadBacklinks(selected);
   }, [selected, loadDoc, loadBacklinks]);
+
+  // 单个文档的 diff：以已提交版本为基准，对比当前编辑器内容。
+  useEffect(() => {
+    if (diffMode !== 'file' || !doc) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      const response = await fetch(`/api/git/show?path=${encodeURIComponent(doc.relPath)}`);
+      const payload = response.ok
+        ? ((await response.json()) as {original: string})
+        : {original: ''};
+
+      if (!cancelled) {
+        setFileDiff({original: payload.original, modified: stateRef.current.draft});
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [diffMode, doc, loadGit]);
 
   useEffect(() => {
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
     const socket = new WebSocket(`${protocol}://${location.host}/ws`);
 
     socket.onmessage = async event => {
-      const change = JSON.parse(event.data as string) as Change | {type: 'ready'};
+      const change = JSON.parse(event.data as string) as
+        | Change
+        | {type: 'ready'}
+        | {type: 'reload'};
 
       if (change.type === 'ready') {
+        return;
+      }
+
+      if (change.type === 'reload') {
+        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
+        location.reload();
         return;
       }
 
@@ -306,13 +460,40 @@ export function App() {
 
       if (event.key === 'Escape') {
         setDiffMode(undefined);
-        setEditing(false);
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>('.filter')?.focus();
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+        return;
+      }
+
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        const index = flatDocs.findIndex(item => item.id === stateRef.current.selected);
+
+        if (index === -1) {
+          return;
+        }
+
+        const next = flatDocs[index + (event.key === 'ArrowDown' ? 1 : -1)];
+
+        if (next) {
+          event.preventDefault();
+          setSelected(next.id);
+        }
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [save]);
+  }, [save, flatDocs]);
 
   const createDoc = async (kind: DocKind) => {
     const id = newId.trim().replace(/\.md$/i, '');
@@ -341,7 +522,6 @@ export function App() {
     setNewId('');
     await loadDocs();
     setSelected(fullId);
-    setEditing(true);
   };
 
   const removeDoc = async () => {
@@ -421,20 +601,22 @@ export function App() {
     return (id: string) => map.get(id) ?? id;
   }, [docs]);
 
-  const rendered = useMemo(() => (doc ? markdown.render(doc.body) : ''), [doc]);
-
   const diff = useMemo(() => {
     if (!doc || !diffMode) {
       return undefined;
     }
 
-    if (diffMode === 'mine') {
-      const lines = diffLines(doc.body, draft);
+    if (diffMode === 'file') {
+      if (!fileDiff) {
+        return undefined;
+      }
+
+      const lines = diffLines(fileDiff.original, fileDiff.modified);
       return {
-        original: doc.body,
-        modified: draft,
+        original: fileDiff.original,
+        modified: fileDiff.modified,
         summary: summarizeDiff(lines),
-        caption: '你的改动（草稿与磁盘现状的差异）',
+        caption: '与上次提交的版本对比',
       };
     }
 
@@ -449,16 +631,24 @@ export function App() {
       summary: summarizeDiff(lines),
       caption: '磁盘上的新版本与你的草稿的差异',
     };
-  }, [doc, draft, diffMode, incoming]);
+  }, [doc, draft, diffMode, incoming, fileDiff]);
 
   const openLink = (id: string) => {
     if (docs.some(item => item.id === id)) {
-      setSelected(id);
-      setEditing(false);
+      selectDoc(id);
       return;
     }
 
     setStatus(`链接目标不在项目里：${id}`);
+  };
+
+  /** 打开文档：有改动就先进 diff，没有就直接进编辑器。 */
+  const selectDoc = (id: string) => {
+    setSelected(id);
+    const target = docs.find(item => item.id === id);
+    const hasDraft = drafts[id] !== undefined;
+    const hasGitChange = target ? changeByPath.has(target.relPath) : false;
+    setDiffMode(hasDraft || hasGitChange ? 'file' : undefined);
   };
 
   const onContentClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -498,6 +688,91 @@ export function App() {
         return item.title.toLowerCase().includes(needle) || item.id.toLowerCase().includes(needle);
       });
 
+  const toggleFolder = (path: string) => {
+    setCollapsed(current => {
+      const next = new Set(current);
+
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+
+      return next;
+    });
+  };
+
+  const renderNode = (node: TreeNode) => {
+    const indent = {paddingLeft: `${0.4 + node.depth * 0.9}rem`};
+
+    if (!node.doc) {
+      const open = !collapsed.has(node.path);
+      const isRoot = node.depth === 0;
+      const label =
+        isRoot
+          ? node.name === 'source'
+            ? 'source · 你的决定'
+            : 'derived · agent 维护'
+          : node.name;
+
+      return (
+        <li key={node.path}>
+          <div className={`folder-row layer-${node.kind}`} style={indent}>
+            <button className="folder" onClick={() => toggleFolder(node.path)} type="button">
+              <span className={`chev${open ? '' : ' collapsed'}`}>▾</span>
+              <span className="folder-name">{label}</span>
+              <span className="count">{countDocs(node)}</span>
+            </button>
+            {isRoot && (
+              <button
+                className="ghost"
+                onClick={() => {
+                  setCreating(node.name as DocKind);
+                  setNewId('');
+                }}
+                title={`新建 ${node.name} 文档`}
+                type="button"
+              >
+                ＋
+              </button>
+            )}
+          </div>
+          {open && node.children.length > 0 && <ul>{node.children.map(renderNode)}</ul>}
+        </li>
+      );
+    }
+
+    const change = changeByPath.get(node.doc.relPath);
+    const badge = change ? statusLabel(change) : undefined;
+
+    return (
+      <li key={node.path}>
+        <button
+          className={`doc layer-${node.doc.kind}${node.doc.id === selected ? ' active' : ''}`}
+          onClick={() => selectDoc(node.doc!.id)}
+          style={indent}
+          type="button"
+        >
+          <span className="file">
+            {fileName(node.doc.id)}
+            <span className="marks">
+              {drafts[node.doc.id] !== undefined && <span className="dot" title="有未保存的草稿" />}
+              {badge && (
+                <span className={`badge ${change!.worktree}`} title="有未提交的改动">
+                  {badge}
+                </span>
+              )}
+            </span>
+          </span>
+          <span className="title">{node.doc.title}</span>
+        </button>
+      </li>
+    );
+  };
+
+  const countDocs = (node: TreeNode): number =>
+    node.doc ? 1 : node.children.reduce((sum, child) => sum + countDocs(child), 0);
+
   return (
     <div className="layout">
       <aside className="sidebar">
@@ -521,10 +796,7 @@ export function App() {
                 <li key={hit.id}>
                   <button
                     className={hit.id === selected ? 'active' : ''}
-                    onClick={() => {
-                      setSelected(hit.id);
-                      setEditing(false);
-                    }}
+                    onClick={() => selectDoc(hit.id)}
                     type="button"
                   >
                     <span className="hit-title">{hit.title}</span>
@@ -536,72 +808,39 @@ export function App() {
             </ul>
           </section>
         ) : (
-          (['source', 'derived'] as const).map(kind => (
-          <section key={kind}>
-            <h2>
-              <span>{kind === 'source' ? 'source · 决定' : 'derived · 方案'}</span>
-              <span className="count">{visible(kind).length}</span>
-              <button
-                className="ghost"
-                title={`新建 ${kind} 文档`}
-                onClick={() => {
-                  setCreating(kind);
-                  setNewId('');
-                }}
-                type="button"
-              >
-                ＋
-              </button>
-            </h2>
-            {creating === kind && (
-              <form
-                className="create"
-                onSubmit={event => {
-                  event.preventDefault();
-                  void createDoc(kind);
-                }}
-              >
-                <input
-                  autoFocus
-                  placeholder={`${kind}/新文档`}
-                  value={newId}
-                  onChange={event => setNewId(event.target.value)}
-                  onKeyDown={event => {
-                    if (event.key === 'Escape') {
-                      setCreating(undefined);
-                    }
-                  }}
-                />
-                <button disabled={busy} type="submit">
-                  建
-                </button>
-              </form>
-            )}
-            <ul>
-              {visible(kind).map(item => (
-                <li key={item.id}>
-                  <button
-                    className={item.id === selected ? 'active' : ''}
-                    onClick={() => {
-                      setSelected(item.id);
-                      setEditing(false);
-                    }}
-                    type="button"
-                  >
-                    <span>{item.title}</span>
-                    {drafts[item.id] !== undefined && <span className="dot" title="有未保存的草稿" />}
-                  </button>
-                </li>
-              ))}
-              {visible(kind).length === 0 && <li className="empty">没有匹配的文档</li>}
-            </ul>
-          </section>
-          ))
+          <ul className="tree">
+            {tree.map(renderNode)}
+            {tree.length === 0 && <li className="empty">暂无文档</li>}
+          </ul>
+        )}
+        {creating && (
+          <form
+            className="create"
+            onSubmit={event => {
+              event.preventDefault();
+              void createDoc(creating);
+            }}
+          >
+            <input
+              autoFocus
+              placeholder={`${creating}/新文档`}
+              value={newId}
+              onChange={event => setNewId(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Escape') {
+                  setCreating(undefined);
+                }
+              }}
+            />
+            <button disabled={busy} type="submit">
+              建
+            </button>
+          </form>
         )}
       </aside>
       <main className="main">
         {gitOpen && (
-          <section className="git">
+          <section className="git pane">
             <header>
               <div>
                 <h2>待提交的文档改动</h2>
@@ -688,10 +927,10 @@ export function App() {
           </section>
         )}
         {doc ? (
-          <>
+          <div className="pane">
             <header>
               <div>
-                <h2>{doc.title}</h2>
+                <h2 className="doc-title">{doc.title}</h2>
                 <p className="meta">
                   {doc.id} · {doc.revision}
                   {dirty && <span className="dirty">未保存</span>}
@@ -699,30 +938,41 @@ export function App() {
               </div>
               <div className="actions">
                 {git?.available && (
-                  <button onClick={() => setGitOpen(value => !value)} type="button">
+                  <button
+                    onClick={() => setGitOpen(value => !value)}
+                    title="待提交的文档改动"
+                    type="button"
+                  >
+                    <GitCommitHorizontal size={14} />
                     {gitOpen ? '回到文档' : `变更 ${git.changes.length}`}
                   </button>
                 )}
-                {dirty && (
-                  <button onClick={() => setDiffMode(mode => (mode === 'mine' ? undefined : 'mine'))} type="button">
-                    改动
+                {(dirty || changeByPath.has(doc.relPath)) && (
+                  <button
+                    onClick={() => setDiffMode(mode => (mode === 'file' ? undefined : 'file'))}
+                    title={diffMode === 'file' ? '回到编辑' : '看相对上次提交的改动'}
+                    type="button"
+                  >
+                    <Columns2 size={14} />
+                    {diffMode === 'file' ? '编辑' : 'diff'}
                   </button>
                 )}
-                <button onClick={() => setEditing(value => !value)} type="button">
-                  {editing ? '阅读' : '编辑'}
-                </button>
-                <button onClick={() => void loadDoc(doc.id)} type="button">
+                <button onClick={() => void loadDoc(doc.id)} title="丢弃草稿并重新读取" type="button">
+                  <RotateCw size={14} />
                   重新载入
                 </button>
-                <button className="danger" onClick={() => void removeDoc()} type="button">
+                <button className="danger" onClick={() => void removeDoc()} title="删除这篇文档" type="button">
+                  <Trash2 size={14} />
                   删除
                 </button>
                 <button
                   className="primary"
                   disabled={!dirty || busy}
                   onClick={() => void save()}
+                  title="保存（⌘S）"
                   type="button"
                 >
+                  <Check size={14} />
                   保存
                 </button>
               </div>
@@ -777,7 +1027,10 @@ export function App() {
               <section className="diff">
                 <div className="diff-head">
                   <span>{diff.caption}</span>
-                  <span className="count">{formatSummary(diff.summary)}</span>
+                  <span className="stat">
+                    <span className="add">+{diff.summary.added}</span>{' '}
+                    <span className="remove">−{diff.summary.removed}</span>
+                  </span>
                   <button onClick={() => setDiffMode(undefined)} type="button">
                     关闭
                   </button>
@@ -789,24 +1042,47 @@ export function App() {
                   modifiedLabel="新内容"
                 />
               </section>
-            ) : editing ? (
+            ) : (
               <MarkdownEditor
                 onChange={value => setDrafts(current => ({...current, [doc.id]: value}))}
                 value={draft}
               />
-            ) : (
-              <div
-                className="markdown"
-                dangerouslySetInnerHTML={{__html: rendered}}
-                onClick={onContentClick}
-              />
             )}
-          </>
+          </div>
         ) : (
-          <p className="meta">左侧选择一篇文档，或者新建一篇。</p>
+          <div className="placeholder">
+            <p>左侧选一篇文档开始。</p>
+            <div className="keys">
+              <span>
+                <kbd>↑</kbd> <kbd>↓</kbd> 切换文档
+              </span>
+              <span>
+                <kbd>⌘K</kbd> 搜索
+              </span>
+              <span>
+                <kbd>⌘S</kbd> 保存
+              </span>
+              <span>
+                <kbd>Esc</kbd> 关闭 diff
+              </span>
+            </div>
+          </div>
         )}
-        {status && <p className="status">{status}</p>}
       </main>
+      <div className="toasts">
+        {toasts.map(toast => (
+          <div className={`toast ${toast.kind}`} key={toast.id}>
+            <span className="icon">
+              {toast.kind === 'ok' ? (
+                <Check size={13} />
+              ) : toast.kind === 'error' || toast.kind === 'warn' ? (
+                <AlertTriangle size={13} />
+              ) : null}
+            </span>
+            {toast.text}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

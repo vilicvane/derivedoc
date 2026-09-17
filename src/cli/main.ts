@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import process from 'node:process';
+import path from 'node:path';
 
 import {initProject} from '../core/project.ts';
 import {DocStore} from '../core/store.ts';
@@ -7,6 +8,28 @@ import {CliError, parseArgs} from './args.ts';
 import {reportError, runCommand} from './commands.ts';
 
 const DEFAULT_PORT = 7788;
+
+/** 从当前文件往上找带 vite.config.ts 的包根目录。 */
+async function findPackageRoot(): Promise<string | undefined> {
+  const fs = await import('node:fs');
+  let dir = import.meta.dirname;
+
+  for (let depth = 0; depth < 5; depth++) {
+    if (fs.existsSync(path.join(dir, 'vite.config.ts'))) {
+      return dir;
+    }
+
+    const parent = path.dirname(dir);
+
+    if (parent === dir) {
+      break;
+    }
+
+    dir = parent;
+  }
+
+  return undefined;
+}
 
 const HELP = `derivedoc — source 沉淀决定，derived 承载方案
 
@@ -53,7 +76,7 @@ async function main(): Promise<void> {
 
   try {
     if (!command) {
-      await serve(dir!, options.get('port'), options.get('host'), options.get('open') === true);
+      await serve(dir!, options.get('port'), options.get('host'), options.get('open') === true, options.get('dev') === true);
       return;
     }
 
@@ -86,6 +109,7 @@ async function serve(
   port: unknown,
   host: unknown,
   open: boolean,
+  dev: boolean,
 ): Promise<void> {
   const portNumber = typeof port === 'string' ? Number(port) : DEFAULT_PORT;
 
@@ -97,9 +121,16 @@ async function serve(
   const store = await DocStore.open(dir);
   // 服务栈（Hono、MCP、ws）只在真正要起服务时加载，普通子命令不必付这份成本。
   const {startServer} = await import('../server/index.ts');
+  const packageRoot = dev ? await findPackageRoot() : undefined;
+
+  if (dev && !packageRoot) {
+    throw new CliError('找不到 vite.config.ts，--dev 需要在源码仓库里运行');
+  }
+
   const server = await startServer(store, {
     port: portNumber,
     ...(typeof host === 'string' ? {host} : {}),
+    ...(packageRoot ? {dev: {configFile: path.join(packageRoot, 'vite.config.ts')}} : {}),
   });
 
   const counts = countByKind(store);
@@ -110,6 +141,7 @@ async function serve(
       `  项目目录  ${store.root}${init.created.length ? `（新建 ${init.created.join('、')}）` : ''}`,
       `  文档      source ${counts.source} · derived ${counts.derived}`,
       `  MCP       ${server.mcpUrl}`,
+      ...(dev ? ['  模式      dev（Vite watch 构建，改完自动刷新页面）'] : []),
       '',
       `  命令行：dd ${dir} ls`,
       `  接入 Codex：codex mcp add derivedoc --url ${server.mcpUrl}`,

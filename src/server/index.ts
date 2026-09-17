@@ -12,6 +12,8 @@ import {createMcpServer} from './mcp.ts';
 export interface ServerOptions {
   port: number;
   host?: string;
+  /** 开发模式：跑 Vite 的 watch 构建，构建完成后让页面自己刷新。 */
+  dev?: {configFile: string};
 }
 
 export interface RunningServer {
@@ -29,6 +31,7 @@ export async function startServer(
   const host = options.host ?? '127.0.0.1';
   const app = createApp(store);
   const honoListener = getRequestListener(app.fetch);
+  let devWatcher: {close(): Promise<void>} | undefined;
 
   // stateless 模式的约定：每个请求一套 server + transport，用完即弃。
   const handleMcp = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -56,7 +59,9 @@ export async function startServer(
   };
 
   const server = createServer((req, res) => {
-    if (req.url && new URL(req.url, 'http://localhost').pathname === '/mcp') {
+    const pathname = req.url ? new URL(req.url, 'http://localhost').pathname : '/';
+
+    if (pathname === '/mcp') {
       void handleMcp(req, res).catch(error => {
         process.stderr.write(
           `[mcp] ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
@@ -85,6 +90,16 @@ export async function startServer(
   const wss = new WebSocketServer({server, path: '/ws'});
   const clients = new Set<import('ws').WebSocket>();
 
+  const broadcast = (payload: unknown) => {
+    const message = JSON.stringify(payload);
+
+    for (const client of clients) {
+      if (client.readyState === client.OPEN) {
+        client.send(message);
+      }
+    }
+  };
+
   wss.on('connection', socket => {
     clients.add(socket);
     socket.on('close', () => clients.delete(socket));
@@ -92,14 +107,28 @@ export async function startServer(
   });
 
   const unsubscribe = store.onChange(change => {
-    const payload = JSON.stringify(change);
-
-    for (const client of clients) {
-      if (client.readyState === client.OPEN) {
-        client.send(payload);
-      }
-    }
+    broadcast(change);
   });
+
+  if (options.dev) {
+    const {build} = await import('vite');
+    const watcher = (await build({
+      configFile: options.dev.configFile,
+      build: {watch: {}},
+      logLevel: 'warn',
+    })) as unknown as {
+      on(event: string, listener: (event: {code?: string}) => void): void;
+      close(): Promise<void>;
+    };
+
+    watcher.on('event', event => {
+      if (event.code === 'BUNDLE_END' || event.code === 'END') {
+        broadcast({type: 'reload'});
+      }
+    });
+
+    devWatcher = watcher;
+  }
 
   const port = await listen(server, options.port, host);
 
@@ -114,6 +143,7 @@ export async function startServer(
         client.close();
       }
       await new Promise<void>(resolve => wss.close(() => resolve()));
+      await devWatcher?.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
       await store.close();
     },

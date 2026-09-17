@@ -56,8 +56,7 @@ export function DocPane({
     draft,
     dirty,
     busy,
-    drafts,
-    setDrafts,
+    setDraft,
     incoming,
     showIncoming,
     setShowIncoming,
@@ -67,7 +66,6 @@ export function DocPane({
     showProvenance,
     setShowProvenance,
     save,
-    loadDoc,
     removeDoc,
   } = session;
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -77,8 +75,7 @@ export function DocPane({
   }
 
   const change = changeByPath.get(doc.relPath);
-  const changeDraft = (value: string) =>
-    setDrafts(current => ({...current, [doc.id]: value}));
+  const changeDraft = (value: string) => setDraft(doc.id, value);
 
   return (
     <div className="pane">
@@ -249,12 +246,12 @@ export function DocPane({
           />
         </section>
       ) : (
-        <MarkdownEditor
-          autoFocus={autoFocus}
-          onChange={changeDraft}
-          onPick={onPick}
-          value={drafts[doc.id] ?? draft}
-        />
+          <MarkdownEditor
+            autoFocus={autoFocus}
+            onChange={changeDraft}
+            onPick={onPick}
+            value={draft}
+          />
       )}
     </div>
   );

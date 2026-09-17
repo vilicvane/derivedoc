@@ -3,13 +3,23 @@ import {useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAc
 import {api, ApiError, messageOf} from '../api.ts';
 import type {Change, ConversationRecord, Doc, DocMeta, Incoming} from '../types.ts';
 
+/**
+ * 一篇的草稿：内容，加上它基于的磁盘版本。正文用来判断离开期间磁盘动没动，
+ * 修订号用来保存——草稿改了哪一版，就按哪一版提交，免得盖掉别人的改动。
+ */
+interface Draft {
+  value: string;
+  base: string;
+  revision: string;
+}
+
 export interface DocSession {
   doc?: Doc;
   /** 编辑器当前内容（草稿优先）。 */
   draft: string;
   dirty: boolean;
-  drafts: Record<string, string>;
-  setDrafts: Dispatch<SetStateAction<Record<string, string>>>;
+  /** 记下某篇的草稿；内容与磁盘一致就当作没改过，不留下草稿。 */
+  setDraft: (id: string, value: string) => void;
   /** 某篇有没有未保存的改动。 */
   hasDraft: (id: string) => boolean;
   incoming?: Incoming;
@@ -45,7 +55,7 @@ export function useDocSession(
 ): DocSession {
   const {notify, onSaved, onRemoved} = options;
   const [doc, setDoc] = useState<Doc>();
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [incoming, setIncoming] = useState<Incoming>();
   const [showIncoming, setShowIncoming] = useState(false);
   const [backlinks, setBacklinks] = useState<DocMeta[]>([]);
@@ -58,19 +68,56 @@ export function useDocSession(
   const latest = useRef({doc, drafts, selected});
   latest.current = {doc, drafts, selected};
 
-  const draft = selected ? drafts[selected] ?? doc?.body ?? '' : '';
+  const stored = selected ? drafts[selected] : undefined;
+  const draft = stored?.value ?? doc?.body ?? '';
   const dirty = doc !== undefined && draft !== doc.body;
 
   /**
-   * 有没有未保存的改动。只有当前这篇能拿磁盘正文比对；已经切走的文档只剩草稿，
-   * 有草稿就算有改动（编辑器只在用户真的敲字时才写草稿）。
+   * 有没有未保存的改动。当前这篇拿磁盘正文比对；已经切走的文档留着草稿，
+   * 有草稿就是有改动（草稿只会在内容真的和磁盘不同时才存在）。
    */
   const hasDraft = useCallback(
     (id: string) => {
       const current = latest.current;
-      return drafts[id] !== undefined && (current.doc?.id === id ? drafts[id] !== current.doc.body : true);
+      const entry = drafts[id];
+
+      return entry !== undefined && (current.doc?.id === id ? entry.value !== current.doc.body : true);
     },
     [drafts],
+  );
+
+  /**
+   * 记草稿。编辑器只在用户真的敲字时回报内容，但敲回来的内容可能又和磁盘一样
+   * （比如撤销到底）——那就当没改过，把草稿删掉。留在那里的话，一旦切到别的
+   * 文档就没法再和磁盘比对，标记会一直亮着，看起来像凭空冒出来的未保存。
+   *
+   * 每个草稿记下它基于的磁盘正文：切走再回来时，靠它知道磁盘在这期间动没动。
+   */
+  const setDraft = useCallback(
+    (id: string, value: string) => {
+      const current = latest.current;
+      const doc = current.doc?.id === id ? current.doc : undefined;
+
+      setDrafts(current => {
+        const entry = current[id];
+
+        if (value === doc?.body) {
+          if (entry === undefined) {
+            return current;
+          }
+
+          const next = {...current};
+          delete next[id];
+          return next;
+        }
+
+        // 已经开过头就沿用原来的基准：中间来过的外部改动不该被算进这份草稿的底子。
+        const basis = entry ?? {base: doc?.body ?? '', revision: doc?.revision ?? ''};
+
+        return entry?.value === value ? current : {...current, [id]: {...basis, value}};
+      });
+    },
+    [],
   );
 
   const loadDoc = useCallback(
@@ -89,13 +136,30 @@ export function useDocSession(
       }
 
       setDoc(payload);
-      setIncoming(undefined);
       setShowIncoming(false);
-      setDrafts(current => {
-        const next = {...current};
-        delete next[id];
-        return next;
-      });
+
+      const entry = latest.current.drafts[id];
+
+      if (entry === undefined || entry.value === payload.body) {
+        // 没改过，或者改回了磁盘上的样子：把草稿清掉，别留下假的未保存。
+        setIncoming(undefined);
+        setDrafts(current => {
+          if (current[id] === undefined) {
+            return current;
+          }
+
+          const next = {...current};
+          delete next[id];
+          return next;
+        });
+      } else if (entry.base === payload.body) {
+        // 离开的这段时间磁盘没动，草稿接着用，不打扰。
+        setIncoming(undefined);
+      } else {
+        // 离开的这段时间磁盘动过：草稿留着，横幅说明有分歧（这里不再多弹一条提示）。
+        setIncoming({id, revision: payload.revision, body: payload.body});
+      }
+
       return payload;
     },
     [notify, workspaceId],
@@ -104,11 +168,13 @@ export function useDocSession(
   const save = useCallback(async () => {
     const current = latest.current;
 
-    if (!current.doc || current.drafts[current.doc.id] === undefined) {
+    const entry = current.doc ? current.drafts[current.doc.id] : undefined;
+
+    if (!current.doc || entry === undefined) {
       return;
     }
 
-    const body = current.drafts[current.doc.id]!;
+    const body = entry.value;
 
     if (body === current.doc.body) {
       return;
@@ -119,11 +185,16 @@ export function useDocSession(
     pendingWrite.current = {id: current.doc.id, body};
 
     try {
-      await api.writeDoc(workspaceId, current.doc.id, body, current.doc.revision);
+      await api.writeDoc(workspaceId, current.doc.id, body, entry.revision);
     } catch (error) {
       pendingWrite.current = undefined;
       setBusy(false);
-      notify(`保存失败：${messageOf(error)}`, 'save');
+      notify(
+        error instanceof ApiError && error.status === 409
+          ? '磁盘上有新版本，草稿先留着：看差异决定怎么合'
+          : `保存失败：${messageOf(error)}`,
+        'save',
+      );
       await loadDoc(current.doc.id);
       return;
     }
@@ -241,7 +312,7 @@ export function useDocSession(
         return;
       }
 
-      const edited = current.drafts[fresh.id];
+      const edited = current.drafts[fresh.id]?.value;
 
       if (edited === undefined || edited === current.doc?.body) {
         setDoc(fresh);
@@ -277,8 +348,7 @@ export function useDocSession(
     doc,
     draft,
     dirty,
-    drafts,
-    setDrafts,
+    setDraft,
     hasDraft,
     incoming,
     showIncoming,

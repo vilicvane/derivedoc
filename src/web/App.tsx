@@ -1,20 +1,12 @@
-import MarkdownIt from 'markdown-it';
 import {
   AlertTriangle,
   Check,
   ChevronDown,
-  Columns2,
   GitCommitHorizontal,
-  Minus,
   Plus,
-  Quote,
-  RotateCw,
-  Trash2,
-  X,
 } from 'lucide-react';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
-  Navigate,
   Route,
   Routes,
   useLocation,
@@ -23,10 +15,9 @@ import {
   useSearchParams,
 } from 'react-router';
 
-import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/diff.ts';
+import {diffLines, summarizeDiff} from '../core/diff.ts';
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
-import {resolveDocId} from '../core/links.ts';
-import {api, ApiError, messageOf} from './api.ts';
+import {api, messageOf} from './api.ts';
 import {DocPane} from './components/DocPane.tsx';
 import {ReviewPane} from './components/ReviewPane.tsx';
 import {useDocSession} from './hooks/useDocSession.ts';
@@ -35,27 +26,10 @@ import {useDocs} from './hooks/useDocs.ts';
 import {useGitReview} from './hooks/useGitReview.ts';
 import {useToasts} from './hooks/useToasts.ts';
 import {useWorkspaces} from './hooks/useWorkspaces.ts';
-import {MarkdownDiff, MarkdownEditor, type Pick} from './editors.tsx';
-import {draftMessage, formatTime, shortenPath, statusLabel} from './format.ts';
-import {buildTree, countDocs, fileName, flattenTree, type TreeNode} from './tree.ts';
-import {
-  hasUnstaged,
-  isStaged,
-  type Change,
-  type ConversationRecord,
-  type Doc,
-  type DocKind,
-  type DocMeta,
-  type GitChange,
-  type GitStatus,
-  type Incoming,
-  type SearchHit,
-  type Toast,
-  type WorkspaceInfo,
-  type WorkspaceRef,
-} from './types.ts';
-
-const markdown = new MarkdownIt({html: false, linkify: true});
+import type {Pick} from './editors.tsx';
+import {shortenPath, statusLabel} from './format.ts';
+import {countDocs, fileName, type TreeNode} from './tree.ts';
+import {isStaged, type Change, type DocKind} from './types.ts';
 
 export function App() {
   return (
@@ -94,11 +68,10 @@ function DefaultWorkspace() {
 
 function Workspace() {
   const [filter, setFilter] = useState('');
-  const [creating, setCreating] = useState<DocKind>();
+  const [, setCreating] = useState<DocKind>();
   const [creatingFolder, setCreatingFolder] = useState<string>();
   const [newId, setNewId] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState('');
   const [newDocs, setNewDocs] = useState('');
@@ -149,20 +122,9 @@ function Workspace() {
     status: git,
     file: gitFile,
     setFile: setGitFile,
-    base: reviewBase,
-    setBase: setReviewBase,
-    diffText: gitDiffText,
-    sides: gitSides,
-    message: gitMessage,
-    setMessage: setGitMessage,
-    busy: gitBusy,
     changeByPath,
-    commitCount,
-    stagedCount,
     loadGit,
-    loadDiff: loadGitDiff,
     stage,
-    commit,
   } = gitReview;
 
   const session = useDocSession(workspaceId, selected, {
@@ -181,25 +143,16 @@ function Workspace() {
   const {
     doc,
     draft,
-    dirty,
-    drafts,
-    setDrafts,
     hasDraft,
     incoming,
     showIncoming,
     setShowIncoming,
     setIncoming,
-    backlinks,
-    provenance,
-    showProvenance,
-    setShowProvenance,
     busy,
     loadDoc,
     applyExternal,
-    acceptIncoming,
     save,
     createDoc: createDocInStore,
-    removeDoc,
   } = session;
 
   const diffMode: 'file' | 'incoming' | undefined =
@@ -262,7 +215,6 @@ function Workspace() {
   );
 
   const stateRef = useRef({doc, draft, selected});
-  const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
   const focusEditorRef = useRef(false);
   stateRef.current = {doc, draft, selected};
 
@@ -499,43 +451,6 @@ function Workspace() {
     const hasGitChange = target ? changeByPath.has(target.relPath) : false;
     openDoc(id, {diff: !hasDraft(id) && hasGitChange});
   };
-
-  const onContentClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    const anchor = (event.target as HTMLElement).closest('a');
-
-    if (!anchor || !doc) {
-      return;
-    }
-
-    const href = anchor.getAttribute('href') ?? '';
-
-    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
-      return;
-    }
-
-    event.preventDefault();
-    const id = resolveDocId(href, doc.id);
-
-    if (!id) {
-      setStatus(`无法解析链接：${href}`);
-      return;
-    }
-
-    openLink(id);
-  };
-
-  const visible = (kind: DocKind) =>
-    docs
-      .filter(item => item.kind === kind)
-      .filter(item => {
-        const needle = filter.trim().toLowerCase();
-
-        if (!needle) {
-          return true;
-        }
-
-        return item.title.toLowerCase().includes(needle) || item.id.toLowerCase().includes(needle);
-      });
 
   const toggleFolder = (path: string) => {
     setCollapsed(current => {

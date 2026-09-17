@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
 
 import {api} from '../api.ts';
 
@@ -12,25 +12,33 @@ export function useDocDiff(
   sides?: {original: string; modified: string};
   reload: () => Promise<void>;
 } {
-  const [sides, setSides] = useState<{original: string; modified: string}>();
+  /** 基准（暂存区或 HEAD）那一侧的正文，右边永远跟着草稿走。 */
+  const [original, setOriginal] = useState<string>();
+  const relPath = doc?.relPath;
 
   const reload = useCallback(async () => {
-    if (!doc) {
+    if (!relPath) {
       return;
     }
 
-    const payload = await api.gitShow(workspaceId, doc.relPath, 'index').catch(() => undefined);
+    const payload = await api.gitShow(workspaceId, relPath, 'index').catch(() => undefined);
 
-    setSides(payload ? {original: payload.original, modified: draft} : undefined);
-  }, [doc, draft, workspaceId]);
+    setOriginal(payload?.original);
+  }, [relPath, workspaceId]);
 
   useEffect(() => {
     if (enabled) {
       void reload();
     } else {
-      setSides(undefined);
+      setOriginal(undefined);
     }
   }, [enabled, reload]);
+
+  // 右边跟着草稿走，不再为了每次按键重跑一次请求。
+  const sides = useMemo(
+    () => (original === undefined ? undefined : {original, modified: draft}),
+    [original, draft],
+  );
 
   return {sides, reload};
 }

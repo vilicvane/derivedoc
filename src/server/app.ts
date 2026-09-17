@@ -154,7 +154,15 @@ export function createApp(hub: WorkspaceHub): Hono {
   app.get('/api/git/status', c => withStore(c, async store => c.json(await gitStatus(store.root))));
 
   app.get('/api/git/diff', c =>
-    withStore(c, async store => c.json({diff: await gitDiff(store.root, c.req.query('path'))})),
+    withStore(c, async store =>
+      c.json({
+        diff: await gitDiff(
+          store.root,
+          c.req.query('path'),
+          c.req.query('base') === 'index' ? 'index' : 'head',
+        ),
+      }),
+    ),
   );
 
   app.post('/api/git/stage', c =>

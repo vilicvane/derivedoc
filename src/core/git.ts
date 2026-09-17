@@ -131,19 +131,29 @@ async function attachLineStats(
   }
 }
 
-export async function gitDiff(root: string, file?: string): Promise<string> {
+export async function gitDiff(
+  root: string,
+  file?: string,
+  base: 'head' | 'index' = 'head',
+): Promise<string> {
   const scoped = file ? ['--', file] : ['--', ...SCOPES];
   const hasHead = (await run(root, ['rev-parse', '--verify', '--quiet', 'HEAD'])).code === 0;
-  const result = hasHead
-    ? await run(root, ['diff', '--no-color', '--text', 'HEAD', ...scoped])
-    : {code: 0, stdout: '', stderr: ''};
+  // base=head：已提交版本 ↔ 工作区；base=index：暂存区 ↔ 工作区。
+  const result =
+    base === 'index'
+      ? await run(root, ['diff', '--no-color', '--text', ...scoped])
+      : hasHead
+        ? await run(root, ['diff', '--no-color', '--text', 'HEAD', ...scoped])
+        : {code: 0, stdout: '', stderr: ''};
 
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || 'git diff 失败');
   }
 
   // 未跟踪的新文件不在 diff 里，补一份“全新增”的展示。
-  const untracked = hasHead
+  const untracked = base === 'index'
+    ? {code: 0, stdout: '', stderr: ''}
+    : hasHead
     ? await run(root, [
         'ls-files',
         '--others',

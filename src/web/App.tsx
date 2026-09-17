@@ -221,6 +221,7 @@ function Workspace() {
   const [gitFile, setGitFile] = useState<string>();
   const [gitDiffText, setGitDiffText] = useState('');
   const [gitSides, setGitSides] = useState<{original: string; modified: string}>();
+  const [reviewBase, setReviewBase] = useState<'head' | 'index'>('head');
   const [gitMessage, setGitMessage] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
   const [workspace, setWorkspace] = useState<{root: string; name: string}>();
@@ -374,9 +375,9 @@ function Workspace() {
     return payload;
   }, []);
 
-  const loadGitDiff = useCallback(async (file?: string) => {
+  const loadGitDiff = useCallback(async (file?: string, base: 'head' | 'index' = 'head') => {
     const query = file ? `?path=${encodeURIComponent(file)}` : '';
-    const response = await fetch(`/api/git/diff${query}`);
+    const response = await fetch(`/api/git/diff${query}${query ? '&' : '?'}base=${base}`);
 
     if (!response.ok) {
       setGitDiffText('');
@@ -391,7 +392,9 @@ function Workspace() {
       return;
     }
 
-    const sides = await fetch(`/api/git/show?path=${encodeURIComponent(file)}`);
+    const sides = await fetch(
+      `/api/git/show?path=${encodeURIComponent(file)}${base === 'index' ? '&base=index' : ''}`,
+    );
     setGitSides(
       sides.ok
         ? ((await sides.json()) as {original: string; modified: string})
@@ -554,9 +557,9 @@ function Workspace() {
 
   useEffect(() => {
     if (gitOpen) {
-      void loadGitDiff(gitFile);
+      void loadGitDiff(gitFile, reviewBase);
     }
-  }, [gitOpen, gitFile, loadGitDiff]);
+  }, [gitOpen, gitFile, loadGitDiff, reviewBase]);
 
   // 每次进审阅页默认选中第一个文件（只看一次），而不是让用户先面对一份混合 diff。
   useEffect(() => {
@@ -1030,11 +1033,16 @@ function Workspace() {
             {fileName(node.doc.id)}
             <span className="marks">
               {drafts[node.doc.id] !== undefined && <span className="dot" title="有未保存的草稿" />}
-              {badge && (
+              {change?.added !== undefined ? (
+                <span className="delta" title={`${statusLabel(change)}：未提交`}>
+                  <span className="add">+{change.added}</span>
+                  <span className="remove">−{change.removed ?? 0}</span>
+                </span>
+              ) : badge ? (
                 <span className={`badge ${change!.worktree}`} title="有未提交的改动">
                   {badge}
                 </span>
-              )}
+              ) : null}
             </span>
           </span>
           <span className="title">{node.doc.title}</span>
@@ -1115,6 +1123,26 @@ function Workspace() {
               </div>
               <div className="actions">
                 {git && git.changes.length > 0 && (
+                  <div className="segmented" role="group" aria-label="diff 基准">
+                    <button
+                      className={reviewBase === 'head' ? 'on' : ''}
+                      onClick={() => setReviewBase('head')}
+                      title="与已提交版本比较"
+                      type="button"
+                    >
+                      与 HEAD
+                    </button>
+                    <button
+                      className={reviewBase === 'index' ? 'on' : ''}
+                      onClick={() => setReviewBase('index')}
+                      title="与暂存区比较"
+                      type="button"
+                    >
+                      与暂存区
+                    </button>
+                  </div>
+                )}
+                {git && git.changes.length > 0 && (
                   <button onClick={() => void stage()} title="把两层文档的改动全部暂存" type="button">
                     全部暂存
                   </button>
@@ -1153,12 +1181,12 @@ function Workspace() {
                             onClick={() => setGitFile(change.path)}
                             type="button"
                           >
-                            <span className={`badge${change.index !== ' ' && change.index !== '?' ? ' staged' : ''}`}>
-                              {statusLabel(change)}
-                            </span>
                             <span className="path">{change.path}</span>
                             {change.added !== undefined && (
-                              <span className="stat">
+                              <span
+                                className={`stat${change.index !== ' ' && change.index !== '?' ? ' staged' : ''}`}
+                                title={statusLabel(change)}
+                              >
                                 <span className="add">+{change.added}</span>{' '}
                                 <span className="remove">−{change.removed ?? 0}</span>
                               </span>

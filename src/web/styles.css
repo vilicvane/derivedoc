@@ -848,6 +848,37 @@ textarea {
   font-size: 0.72rem;
 }
 
+.segmented {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  display: inline-flex;
+  overflow: hidden;
+}
+
+.segmented button {
+  background: transparent;
+  border: none;
+  color: var(--ink-3);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.74rem;
+  padding: 0.22rem 0.6rem;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.segmented button + button {
+  border-left: 1px solid var(--rule);
+}
+
+.segmented button:hover {
+  color: var(--ink);
+}
+
+.segmented button.on {
+  background: var(--ink);
+  color: var(--paper-raised);
+}
+
 .git-body {
   display: grid;
   flex: 1;
@@ -971,6 +1002,31 @@ textarea {
   font-family: var(--mono);
   font-size: 0.66rem;
   white-space: nowrap;
+}
+
+.git-files .stat.staged {
+  color: var(--ink-3);
+}
+
+.git-files .stat.staged .add,
+.git-files .stat.staged .remove {
+  color: var(--ink-4);
+}
+
+.delta {
+  display: inline-flex;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  gap: 0.2rem;
+  margin-left: auto;
+}
+
+.delta .add {
+  color: var(--ok);
+}
+
+.delta .remove {
+  color: var(--danger);
 }
 
 .git-files .stat .add {

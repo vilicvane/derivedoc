@@ -2,6 +2,7 @@ import MarkdownIt from 'markdown-it';
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
   Columns2,
   GitCommitHorizontal,
   Plus,
@@ -192,11 +193,38 @@ function formatTime(iso: string): string {
 export function App() {
   return (
     <Routes>
-      <Route element={<Workspace />} path="/" />
-      <Route element={<Workspace />} path="/d/*" />
-      <Route element={<Workspace />} path="/changes" />
-      <Route element={<Navigate replace to="/" />} path="*" />
+      <Route element={<Workspace />} path="/w/:ws" />
+      <Route element={<Workspace />} path="/w/:ws/d/*" />
+      <Route element={<Workspace />} path="/w/:ws/changes" />
+      <Route element={<DefaultWorkspace />} path="*" />
     </Routes>
+  );
+}
+
+/** 没有指定工作区时，问服务端默认是哪个，然后跳过去。 */
+function DefaultWorkspace() {
+  const navigate = useNavigate();
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      const response = await fetch('/api/workspaces').catch(() => undefined);
+      const payload = response?.ok
+        ? ((await response.json()) as {defaultId: string})
+        : undefined;
+
+      if (payload?.defaultId) {
+        navigate(`/w/${payload.defaultId}/`, {replace: true});
+      } else {
+        setFailed(true);
+      }
+    })();
+  }, [navigate]);
+
+  return (
+    <div className="placeholder">
+      <p>{failed ? '连不上 derivedoc 服务' : '正在打开工作区…'}</p>
+    </div>
   );
 }
 
@@ -225,6 +253,9 @@ function Workspace() {
   const [gitMessage, setGitMessage] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
   const [workspace, setWorkspace] = useState<{root: string; name: string}>();
+  const [workspaceList, setWorkspaceList] = useState<Array<{id: string; name: string; root: string; open: boolean}>>([]);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [newWorkspace, setNewWorkspace] = useState('');
   const [provenance, setProvenance] = useState<ConversationRecord[]>([]);
   const [showProvenance, setShowProvenance] = useState(false);
 
@@ -233,8 +264,20 @@ function Workspace() {
   const params = useParams();
   const {pathname} = useLocation();
   const [searchParams] = useSearchParams();
+  const workspaceId = params.ws ?? '';
   const selected = params['*'] ? decodeURIComponent(params['*']) : undefined;
-  const gitOpen = pathname.startsWith('/changes');
+  const gitOpen = pathname.endsWith('/changes');
+  /** 所有接口都带上当前工作区。 */
+  const wsQuery = useCallback(
+    (extra: Record<string, string> = {}) =>
+      new URLSearchParams({...extra, ...(workspaceId ? {ws: workspaceId} : {})}).toString(),
+    [workspaceId],
+  );
+  const docUrl = useCallback(
+    (id: string, options: {diff?: boolean} = {}) =>
+      `/w/${workspaceId}/d/${id}${options.diff ? '?diff=1' : ''}`,
+    [workspaceId],
+  );
   const diffMode: 'file' | 'incoming' | undefined =
     incoming && showIncoming
       ? 'incoming'
@@ -246,9 +289,9 @@ function Workspace() {
     (id: string, options: {diff?: boolean} = {}) => {
       setIncoming(undefined);
       setShowIncoming(false);
-      navigate(`/d/${id}${options.diff ? '?diff=1' : ''}`);
+      navigate(docUrl(id, options));
     },
-    [navigate],
+    [navigate, docUrl],
   );
 
   const draft = selected ? drafts[selected] ?? doc?.body ?? '' : '';
@@ -309,15 +352,25 @@ function Workspace() {
   }, [tree]);
 
   const loadDocs = useCallback(async () => {
-    const response = await fetch('/api/docs');
+    const response = await fetch(`/api/docs?${wsQuery()}`);
     const payload = (await response.json()) as {docs: DocMeta[]};
     setDocs(payload.docs);
     return payload.docs;
+  }, [wsQuery]);
+
+  const loadWorkspaces = useCallback(async () => {
+    const response = await fetch('/api/workspaces');
+
+    if (!response.ok) {
+      return;
+    }
+
+    setWorkspaceList(((await response.json()) as {workspaces: typeof workspaceList}).workspaces);
   }, []);
 
   useEffect(() => {
     void (async () => {
-      const response = await fetch('/api/health');
+      const response = await fetch(`/api/health?${wsQuery()}`);
 
       if (!response.ok) {
         return;
@@ -328,10 +381,11 @@ function Workspace() {
       setWorkspace({root: payload.root, name});
       document.title = `${name} · derivedoc`;
     })();
-  }, []);
+    void loadWorkspaces();
+  }, [wsQuery, loadWorkspaces]);
 
   const loadDoc = useCallback(async (id: string) => {
-    const response = await fetch(`/api/doc?id=${encodeURIComponent(id)}`);
+    const response = await fetch(`/api/doc?${wsQuery({id})}`);
 
     if (!response.ok) {
       setStatus(
@@ -350,15 +404,15 @@ function Workspace() {
       return next;
     });
     return payload;
-  }, []);
+  }, [wsQuery]);
 
   const loadBacklinks = useCallback(async (id: string) => {
-    const response = await fetch(`/api/backlinks?id=${encodeURIComponent(id)}`);
+    const response = await fetch(`/api/backlinks?${wsQuery({id})}`);
     setBacklinks(response.ok ? ((await response.json()) as {docs: DocMeta[]}).docs : []);
-  }, []);
+  }, [wsQuery]);
 
   const loadGit = useCallback(async (options: {keepMessage?: boolean} = {}) => {
-    const response = await fetch('/api/git/status');
+    const response = await fetch(`/api/git/status?${wsQuery()}`);
 
     if (!response.ok) {
       setGit(undefined);
@@ -373,11 +427,11 @@ function Workspace() {
     }
 
     return payload;
-  }, []);
+  }, [wsQuery]);
 
   const loadGitDiff = useCallback(async (file?: string, base: 'head' | 'index' = 'head') => {
     const query = file ? `?path=${encodeURIComponent(file)}` : '';
-    const response = await fetch(`/api/git/diff${query}${query ? '&' : '?'}base=${base}`);
+    const response = await fetch(`/api/git/diff?${wsQuery({...file ? {path: file} : {}, base})}`);
 
     if (!response.ok) {
       setGitDiffText('');
@@ -392,15 +446,13 @@ function Workspace() {
       return;
     }
 
-    const sides = await fetch(
-      `/api/git/show?path=${encodeURIComponent(file)}${base === 'index' ? '&base=index' : ''}`,
-    );
+    const sides = await fetch(`/api/git/show?${wsQuery({path: file, ...(base === 'index' ? {base: 'index'} : {})})}`);
     setGitSides(
       sides.ok
         ? ((await sides.json()) as {original: string; modified: string})
         : undefined,
     );
-  }, []);
+  }, [wsQuery]);
 
   useEffect(() => {
     void loadDocs().then(list => {
@@ -411,7 +463,7 @@ function Workspace() {
       const first = list.find(item => item.kind === 'source') ?? list[0];
 
       if (first) {
-        navigate(`/d/${first.id}`, {replace: true});
+        navigate(docUrl(first.id), {replace: true});
       }
     });
     void loadGit();
@@ -439,7 +491,7 @@ function Workspace() {
     setShowProvenance(false);
 
     void (async () => {
-      const response = await fetch(`/api/conversations?doc=${encodeURIComponent(selected)}`);
+      const response = await fetch(`/api/conversations?${wsQuery({doc: selected})}`);
 
       if (!response.ok) {
         return;
@@ -467,7 +519,7 @@ function Workspace() {
 
     void (async () => {
       const response = await fetch(
-        `/api/git/show?path=${encodeURIComponent(doc.relPath)}&base=index`,
+        `/api/git/show?${wsQuery({path: doc.relPath, base: 'index'})}`,
       );
 
       if (!response.ok) {
@@ -502,6 +554,10 @@ function Workspace() {
         | {type: 'reload'};
 
       if (change.type === 'ready') {
+        return;
+      }
+
+      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
         return;
       }
 
@@ -585,7 +641,7 @@ function Workspace() {
     setStatus('保存中…');
     pendingWriteRef.current = {id: current.doc.id, body: current.draft};
 
-    const response = await fetch(`/api/doc?id=${encodeURIComponent(current.doc.id)}`, {
+    const response = await fetch(`/api/doc?${wsQuery({id: current.doc.id})}`, {
       method: 'PUT',
       headers: {'content-type': 'application/json'},
       body: JSON.stringify({content: current.draft, baseRevision: current.doc.revision}),
@@ -617,7 +673,7 @@ function Workspace() {
     }
 
     const timer = setTimeout(async () => {
-      const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+      const response = await fetch(`/api/search?${wsQuery({q: query})}`);
 
       if (response.ok) {
         setHits(((await response.json()) as {hits: SearchHit[]}).hits);
@@ -645,14 +701,14 @@ function Workspace() {
           if (selected) {
             openDoc(selected);
           } else {
-            navigate('/');
+            navigate(`/w/${workspaceId}/`);
           }
 
           return;
         }
 
         if (searchParams.get('diff') === '1' && selected) {
-          navigate(`/d/${selected}`, {replace: true});
+          navigate(docUrl(selected), {replace: true});
         }
 
         return;
@@ -721,7 +777,7 @@ function Workspace() {
     }
 
     setBusy(true);
-    const response = await fetch(`/api/doc?id=${encodeURIComponent(fullId)}`, {
+    const response = await fetch(`/api/doc?${wsQuery({id: fullId})}`, {
       method: 'POST',
       headers: {'content-type': 'application/json'},
       body: JSON.stringify({content: `# ${id.split('/').pop()}\n\n`}),
@@ -763,7 +819,7 @@ function Workspace() {
 
     setConfirmingDelete(false);
     setBusy(true);
-    const response = await fetch(`/api/doc?id=${encodeURIComponent(doc.id)}`, {method: 'DELETE'});
+    const response = await fetch(`/api/doc?${wsQuery({id: doc.id})}`, {method: 'DELETE'});
     setBusy(false);
 
     if (!response.ok) {
@@ -779,7 +835,7 @@ function Workspace() {
     if (next) {
       openDoc(next.id, {diff: false});
     } else {
-      navigate('/');
+      navigate(`/w/${workspaceId}/`);
     }
   };
 
@@ -831,7 +887,7 @@ function Workspace() {
     if (selected) {
       openDoc(selected);
     } else {
-      navigate('/');
+      navigate(`/w/${workspaceId}/`);
     }
   };
 
@@ -1058,10 +1114,16 @@ function Workspace() {
     <div className="layout">
       <aside className="sidebar">
         <div className="brand">
-          <h1 title={workspace?.root ?? ''}>
+          <button
+            className={`workspace-pick${switcherOpen ? ' open' : ''}`}
+            onClick={() => setSwitcherOpen(value => !value)}
+            title={workspace?.root ?? ''}
+            type="button"
+          >
             <span className="workspace-name">{workspace?.name ?? '…'}</span>
             <span className="product-name">derivedoc</span>
-          </h1>
+            <ChevronDown size={12} />
+          </button>
           <input
             className="filter"
             placeholder="过滤…"
@@ -1069,8 +1131,60 @@ function Workspace() {
             onChange={event => setFilter(event.target.value)}
           />
         </div>
+        {switcherOpen && (
+          <div className="switcher">
+            {workspaceList.map(item => (
+              <button
+                className={`switcher-item${item.id === workspaceId ? ' current' : ''}`}
+                key={item.id}
+                onClick={() => {
+                  setSwitcherOpen(false);
+                  navigate(`/w/${item.id}/`);
+                }}
+                type="button"
+              >
+                <span className="switcher-name">{item.name}</span>
+                <span className="switcher-path">{item.root}</span>
+              </button>
+            ))}
+            <form
+              className="switcher-add"
+              onSubmit={event => {
+                event.preventDefault();
+                void (async () => {
+                  const response = await fetch('/api/workspaces', {
+                    method: 'POST',
+                    headers: {'content-type': 'application/json'},
+                    body: JSON.stringify({root: newWorkspace.trim()}),
+                  });
+                  const payload = (await response.json()) as {
+                    workspace?: {id: string};
+                    error?: {message: string};
+                  };
+
+                  if (!response.ok || !payload.workspace) {
+                    setStatus(`添加失败：${payload.error?.message ?? response.status}`);
+                    return;
+                  }
+
+                  setNewWorkspace('');
+                  setSwitcherOpen(false);
+                  await loadWorkspaces();
+                  navigate(`/w/${payload.workspace.id}/`);
+                })();
+              }}
+            >
+              <input
+                onChange={event => setNewWorkspace(event.target.value)}
+                placeholder="添加工作区：填目录路径"
+                value={newWorkspace}
+              />
+              <button type="submit">添加</button>
+            </form>
+          </div>
+        )}
         {git?.available && git.changes.length > 0 && (
-          <button className="review-cue" onClick={() => navigate('/changes')} type="button">
+          <button className="review-cue" onClick={() => navigate(`/w/${workspaceId}/changes`)} type="button">
             <GitCommitHorizontal size={12} />
             {git.changes.length} 篇未提交
             <span className="cue-action">审阅</span>
@@ -1148,7 +1262,7 @@ function Workspace() {
                   </button>
                 )}
                 <button
-                  onClick={() => (selected ? openDoc(selected) : navigate('/'))}
+                  onClick={() => (selected ? openDoc(selected) : navigate(`/w/${workspaceId}/`))}
                   title="回到文档"
                   type="button"
                 >
@@ -1271,7 +1385,9 @@ function Workspace() {
               <div className="actions">
                 {git?.available && (
                   <button
-                    onClick={() => (gitOpen && selected ? openDoc(selected) : navigate('/changes'))}
+                    onClick={() =>
+                      gitOpen && selected ? openDoc(selected) : navigate(`/w/${workspaceId}/changes`)
+                    }
                     title="待提交的文档改动"
                     type="button"
                   >

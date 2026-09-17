@@ -163,6 +163,110 @@ textarea {
   min-width: 0;
 }
 
+.workspace-pick {
+  align-items: baseline;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex: 1;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.15rem 0.25rem;
+  transition: background var(--dur) var(--ease);
+}
+
+.workspace-pick:hover,
+.workspace-pick.open {
+  background: var(--paper-sunken);
+}
+
+.workspace-pick svg {
+  align-self: center;
+  color: var(--ink-4);
+}
+
+.switcher {
+  background: var(--paper-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  box-shadow: 0 12px 28px -18px rgb(0 0 0 / 45%);
+  display: flex;
+  flex-direction: column;
+  margin: 0 0.35rem 0.8rem;
+  overflow: hidden;
+}
+
+.switcher-item {
+  align-items: baseline;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  font: inherit;
+  gap: 0.1rem;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  transition: background var(--dur) var(--ease);
+}
+
+.switcher-item:hover {
+  background: var(--paper);
+}
+
+.switcher-item.current {
+  background: color-mix(in srgb, var(--source) 8%, transparent);
+}
+
+.switcher-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.switcher-path {
+  color: var(--ink-4);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.switcher-add {
+  border-top: 1px solid var(--rule);
+  display: flex;
+  gap: 0.3rem;
+  padding: 0.4rem;
+}
+
+.switcher-add input {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--ink);
+  flex: 1;
+  font: inherit;
+  font-size: 0.72rem;
+  min-width: 0;
+  padding: 0.2rem 0.4rem;
+}
+
+.switcher-add button {
+  background: var(--ink);
+  border: none;
+  border-radius: 4px;
+  color: var(--paper-raised);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+}
+
 .workspace-name {
   color: var(--ink);
   font-family: var(--serif);

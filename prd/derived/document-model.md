@@ -9,8 +9,8 @@
   .derivedoc/    本地运行数据
     conversations/
       <session-id>.jsonl  对话日志；每个会话一份，只追加不改写；供 source 决定追溯发言者与时间
-    config.json          这个项目的文档目录（例如 "prd"）
-  <文档目录>/    默认就是项目根，也可以是 prd/ 这样的子目录
+    config.json          这个项目的文档目录（例如 "prd"、"ddoc"、"."）
+  <文档目录>/    默认 ddoc/，也可以是 prd/ 这样的名字，或者就是项目根
     source/      决定
     derived/     方案
 ```
@@ -50,5 +50,6 @@
 
 ## 初始化行为
 
-`dd --doc-dir=prd` 只会在项目首次建立时补一篇占位 `source/requirements.md`；用户删掉之后
-不会自动补回来。建的时候把项目根与文档目录都写清楚，文档目录记进 `.derivedoc/config.json`。
+`dd` 只会在项目首次建立时补一篇占位 `source/requirements.md`；用户删掉之后不会自动补回来。
+建的时候项目根默认当前目录、文档目录默认 `ddoc/`，用的文档目录记进 `.derivedoc/config.json`。
+家目录不当作项目根——它是用户级注册表所在，一个向上查找就能把整个家认成工作区。

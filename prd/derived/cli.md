@@ -3,8 +3,8 @@
 **依据**：[人与 agent 的接口](../source/interfaces.md)
 
 `dd [<项目根>=.] [--doc-dir=<文档目录>] [子命令]`。不给子命令就启动服务；给子命令则是纯文档
-读写，不需要服务在场。项目根默认当前目录，文档目录省略时用 `.derivedoc/config.json` 里记下
-的那个。
+读写，不需要服务在场。项目根默认当前目录，文档目录默认 `ddoc/`——都省略就是 `.derivedoc/`
+加 `ddoc/`。已经记过的项目用记下的那个。
 
 ## 命令
 
@@ -17,6 +17,7 @@
 | `dd [<项目根>] write <id> [--base-revision <rev>]` | 整篇写入 |
 | `dd [<项目根>] append <id>` | 追加到文末 |
 | `dd [<项目根>] rm <id> [--base-revision <rev>]` | 删除 |
+| `dd [<项目根>] selection [--json]` | 打印界面上选中的那段；没有时退出码 1 |
 
 第一位 positional 命中子命令名（`ls`、`read`…）时按「在 cwd 里跑子命令」解释，所以 `dd ls`
 和 `dd . ls` 等价；项目根叫 `root` 之类时写 `dd ./root ls`。
@@ -30,12 +31,12 @@
 `dd` 也应该能用）。显式给了 `--doc-dir` 时不做这种向上猜测：给的是哪一对就是哪一对，免得在
 别处误开上层项目。
 
-文档目录按 `--doc-dir` > `.derivedoc/config.json` > 项目根 的顺序确定。显式给过一次就写回
-配置，之后的调用可以省略。
+文档目录按 `--doc-dir` > `.derivedoc/config.json` > 老布局（`source/` 或 `derived/` 就在项目
+根下）> `ddoc/` 的顺序确定。显式给过一次就写回配置，之后的调用可以省略。
 
-创建必须有文档目录，项目根可以省：`dd --doc-dir=prd` 把当前目录当项目根、`prd/` 当文档
-目录，并把文档目录写进 `.derivedoc/config.json`；项目根不在当前目录时写 `dd ./app
---doc-dir=prd`。没给 `--doc-dir`、项目里也没记过时会报错，并提示该怎么建。
+创建不需要额外参数：`dd` 在空项目里建 `.derivedoc/` 与 `ddoc/`；`dd --doc-dir=prd` 或
+`dd ./app --doc-dir=prd` 换目录与项目根。这两个位置都拿不到工作区时（比如家目录——它是用户级
+注册表所在，不当作项目），直接报错而不是就地建。
 
 成本：CLI 一次调用约 38ms（主要是 Node 启动），纯 shell 的同款向上查找几乎为零。所以
 harness 钩子先用 shell 粗筛，确认在工作区里再叫 CLI。
@@ -55,7 +56,8 @@ harness 钩子先用 shell 粗筛，确认在工作区里再叫 CLI。
 ## 示例
 
 ```sh
-dd --doc-dir=prd                                    # 建工作区：项目根默认当前目录
+dd                                                  # 建工作区：.derivedoc/ + ddoc/
+dd . --doc-dir=prd                                  # 文档改放 prd/
 dd ./app --doc-dir=.                                # 项目根与文档目录都是 ./app
 dd append source/requirements '## 决定：先用 CLI 接入'
 rev=$(dd stat derived/storage)

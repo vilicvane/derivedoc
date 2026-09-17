@@ -20,9 +20,11 @@ Monaco 会让 dev server 反复重做依赖优化并整页刷新（实测一次�
 | --- | --- | --- |
 | GET | `/api/health` | `{ok, root, docs, files}`：项目根、文档目录、文档篇数 |
 | GET | `/api/docs?kind=` | 文档列表（元数据） |
+| GET | `/api/resolve?path=&docs=` | 这条路径属于哪个工作区、文档目录在哪、要不要新建 |
 | GET | `/api/doc?id=` | 单篇正文，含 `revision` 与 `frontmatter` |
 | GET | `/api/search?q=` | 标题与正文全文检索，命中带 `snippet` |
 | GET | `/api/backlinks?id=` | 反查谁引用了这篇 |
+| GET/PUT/DELETE | `/api/selection` | 界面选中的那段：读、记、清 |
 | PUT/POST | `/api/doc?id=` | 写入，body 为 `{content, baseRevision?}` |
 | DELETE | `/api/doc?id=` | 删除 |
 
@@ -66,8 +68,33 @@ MCP 是可选通道；给 agent 的默认接口是 [命令行](cli.md)。
 
 ## 界面
 
-界面可切换的工作区列表来自用户主目录下的 `.derivedoc/workspaces.json` 注册表，每条记项目根
-与文档目录（`root` / `docs`）；列表里显示路径用的是文档目录，工作区之间真正的差别在那里。
+界面可切换的工作区列表来自用户级注册表 `~/.config/derivedoc/workspaces.json`（受
+`XDG_CONFIG_HOME` 影响），每条记项目根与文档目录（`root` / `docs`）；列表里显示路径用的是
+文档目录，工作区之间真正的差别在那里。
+
+加工作区走界面里的表单：填项目根与文档目录（文档目录默认 `ddoc/`，服务端用
+`GET /api/resolve` 先认一遍，已有项目会自动填成记下的那个），`POST /api/workspaces` 的 body
+是 `{root, docs?}`，没有 `.derivedoc/` 时就地建一个。
+
+注册表早期放在 `~/.derivedoc/workspaces.json`，而 `.derivedoc` 正是项目标记——家目录因此会被
+向上查找认成项目根。现在写一律写新位置，只在读的时候兼容旧文件；`isProjectRoot` 也显式排除
+家目录。
+
+## 选中内容
+
+文档页里选中一段（非空）就 `PUT /api/selection`，服务端把 `{doc, from, to, quote, revision,
+at, channel}` 覆盖写进项目根下的 `.derivedoc/selection.json`；空选区不动已有记录，清除按钮走
+`DELETE`。只留最近一次——它是「现在指哪儿」，不是历史。
+
+agent 侧读的是 `dd selection`（`--json` 给结构）；没有就退出码 1。
+
+界面上的提示用 Monaco 的 content widget 挂在选区开头**上方**（贴着选区、又不压住它），左边缘
+与选区起点对齐，source 色实底 + 白字写着「已选中，agent 可读」。拖拽过程中不显示——widget
+压在正文上会挡住正在拉的选区；松手之后才贴出来。widget 整体不接鼠标事件
+（`pointer-events: none`），压在正文上也点得透。
+
+提示与记录同生共死：选区收起来（点别处、换文档）就把 `.derivedoc/selection.json` 撤掉，
+不留下「agent 手里有一段、界面上却看不出来」的状态。
 
 web 界面由 Vite 构建到 `bld/web`，由服务托管（产物不存在时返回占位页并提示去构建）。
 

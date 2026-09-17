@@ -20,6 +20,7 @@ import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {api, messageOf} from './api.ts';
 import {DocPane} from './components/DocPane.tsx';
 import {ReviewPane} from './components/ReviewPane.tsx';
+import {docModelKey} from './editor-models.ts';
 import {useDocSession} from './hooks/useDocSession.ts';
 import {useDocDiff} from './hooks/useDocDiff.ts';
 import {useDocs} from './hooks/useDocs.ts';
@@ -744,6 +745,7 @@ function Workspace() {
             diff={diff}
             diffMode={diffMode}
             diffTitle={diffTitle}
+            modelKey={docModelKey(workspaceId, doc.id)}
             onOpenChanges={() => navigate(`/w/${workspaceId}/changes`)}
             onOpenDiff={() => openDoc(doc.id, {diff: diffMode !== 'file'})}
             onPick={recordPick}

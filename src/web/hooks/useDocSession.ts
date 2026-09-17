@@ -68,7 +68,11 @@ export function useDocSession(
   const latest = useRef({doc, drafts, selected});
   latest.current = {doc, drafts, selected};
 
-  const stored = selected ? drafts[selected] : undefined;
+  /**
+   * 编辑器显示的是「已经载入的那篇」的草稿，不是路由里那篇——切文档时 doc 要等一下才到，
+   * 中间这段时间按路由算就会拿着上一篇的正文去当成下一篇的内容。
+   */
+  const stored = doc ? drafts[doc.id] : undefined;
   const draft = stored?.value ?? doc?.body ?? '';
   const dirty = doc !== undefined && draft !== doc.body;
 

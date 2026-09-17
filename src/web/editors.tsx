@@ -19,6 +19,8 @@ import 'monaco-editor/editor/contrib/wordHighlighter/browser/wordHighlighter.js'
 import 'monaco-editor/editor/contrib/wordOperations/browser/wordOperations.js';
 import 'monaco-editor/languages/definitions/markdown/register.js';
 
+import {acquireModel, attachModel, detachModel, syncModel} from './editor-models.ts';
+
 // 本地打包 Monaco（不走 CDN）。所有语言都复用基础 editor worker——这个项目只编辑
 // markdown，不需要 ts/json/css/html 那几套语言服务，也省掉几个 MB 的 worker 产物。
 self.MonacoEnvironment = {getWorker: () => new editorWorker()};
@@ -206,11 +208,14 @@ function watchSelection(
 }
 
 export function MarkdownEditor({
+  modelKey,
   value,
   onChange,
   onPick,
   autoFocus = false,
 }: {
+  /** 这篇文档的 model 名：换文档只换 model，撤销栈跟着文档各留各的。 */
+  modelKey: string;
   value: string;
   onChange: (value: string) => void;
   onPick?: (pick: Pick | undefined) => void;
@@ -219,13 +224,17 @@ export function MarkdownEditor({
   const theme = useTheme();
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<monaco.editor.IStandaloneCodeEditor>(undefined);
+  /** 现在挂着的 model 名，卸载时要解绑。 */
+  const attached = useRef<string>(undefined);
   /** 外部灌入内容时置位，用来区分「用户敲的」和「我们设的」改动事件。 */
   const applying = useRef(false);
   // 回调每次渲染都可能换新，用 ref 让编辑器始终调用最新那个。
   const change = useRef(onChange);
   const pick = useRef(onPick);
+  const latest = useRef({modelKey, value});
   change.current = onChange;
   pick.current = onPick;
+  latest.current = {modelKey, value};
 
   useEffect(() => {
     const container = host.current;
@@ -234,7 +243,8 @@ export function MarkdownEditor({
       return;
     }
 
-    const model = monaco.editor.createModel(value, 'markdown');
+    const key = latest.current.modelKey;
+    const model = acquireModel(key, latest.current.value);
     const instance = monaco.editor.create(container, {
       ...EDITOR_OPTIONS,
       automaticLayout: true,
@@ -250,25 +260,50 @@ export function MarkdownEditor({
     });
 
     editor.current = instance;
+    attached.current = key;
+    attachModel(key);
     watchSelection(instance, next => pick.current?.(next));
 
     return () => {
       subscription.dispose();
       instance.dispose();
-      model.dispose();
       editor.current = undefined;
+      detachModel(key);
+      attached.current = undefined;
     };
   }, []);
 
-  // 外部换了内容（切文档、重新载入）时同步过去。
+  // 换文档：只换 model。每篇的正文和撤销栈都在自己的 model 里，不用重灌。
   useEffect(() => {
     const instance = editor.current;
+    const previous = attached.current;
 
-    if (instance && instance.getValue() !== value) {
-      applying.current = true;
-      instance.setValue(value);
-      applying.current = false;
+    if (!instance || previous === modelKey) {
+      return;
     }
+
+    const model = acquireModel(modelKey, latest.current.value);
+
+    instance.setModel(model);
+    attached.current = modelKey;
+    attachModel(modelKey);
+
+    if (previous !== undefined) {
+      detachModel(previous);
+    }
+  }, [modelKey]);
+
+  // 同一篇的正文被换掉（磁盘上有新版本、用磁盘版本）时整段替换，别用 setValue。
+  useEffect(() => {
+    const model = editor.current?.getModel();
+
+    if (!model || model.getValue() === value) {
+      return;
+    }
+
+    applying.current = true;
+    syncModel(model, value);
+    applying.current = false;
   }, [value]);
 
   useEffect(() => {

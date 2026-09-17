@@ -17,6 +17,7 @@ import {MarkdownDiff, MarkdownEditor, type Pick} from '../editors.tsx';
 /** 一篇文档：标题与动作、两条横幅、引用关系、来源，以及编辑器或 diff。 */
 export function DocPane({
   session,
+  modelKey,
   status,
   changeByPath,
   diff,
@@ -32,6 +33,8 @@ export function DocPane({
   titleOf,
 }: {
   session: DocSession;
+  /** 这篇文档在编辑器里用的 model 名（工作区 + 文档 id）。 */
+  modelKey: string;
   status?: GitStatus;
   changeByPath: Map<string, GitChange>;
   diff?: {
@@ -248,6 +251,7 @@ export function DocPane({
       ) : (
           <MarkdownEditor
             autoFocus={autoFocus}
+            modelKey={modelKey}
             onChange={changeDraft}
             onPick={onPick}
             value={draft}

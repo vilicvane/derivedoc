@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 
 import {api} from '../api.ts';
+import {docModelKey, pruneModels} from '../editor-models.ts';
 import {buildTree, flattenTree, type TreeNode} from '../tree.ts';
 import type {DocMeta, SearchHit} from '../types.ts';
 
@@ -20,6 +21,9 @@ export function useDocs(
 
   const loadDocs = useCallback(async () => {
     const list = await api.docs(workspaceId);
+
+    // 删掉的文档不再需要它的 model；还开着的会自己解绑，这里只清没人挂的。
+    pruneModels(list.map(item => docModelKey(workspaceId, item.id)));
     setDocs(list);
     return list;
   }, [workspaceId]);

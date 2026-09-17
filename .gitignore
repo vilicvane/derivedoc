@@ -1,0 +1,6 @@
+node_modules/
+bld/
+dist/
+*.log
+.derivedoc/
+.DS_Store

@@ -400,7 +400,10 @@ export function createApp(hub: WorkspaceHub): Hono {
       const body = await fsp.readFile(filePath);
       const type = CONTENT_TYPES[path.extname(filePath)] ?? 'application/octet-stream';
       // 带哈希的静态资源可以长缓存，index.html 必须每次校验，否则界面会停在旧版本上。
-      const cache = relative === '/index.html' ? 'no-store' : 'public, max-age=31536000, immutable';
+      // 只有 Vite 产出的哈希资源能长缓存：favicon 这类固定名字的文件改了要立刻生效。
+      const cache = relative.startsWith('/assets/')
+        ? 'public, max-age=31536000, immutable'
+        : 'no-store';
       return new Response(new Uint8Array(body), {
         headers: {'content-type': type, 'cache-control': cache},
       });

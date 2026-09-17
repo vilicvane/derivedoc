@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>derivedoc</title>
+  <!-- 没有底色：朱砂（左，水平翻转的 D）+ 松绿（右 D，中心一枚 +，落在字母的视觉重心上）。
+       左高右低：左边整体上移 1.5，右边下移 1.5。几何全走整数/半整数，无旋转，缩小到 16px 也不糊。 -->
+  <style>
+    .source {
+      fill: #b23a1a;
+    }
+
+    .derived {
+      fill: #1d6b57;
+    }
+
+    .plus {
+      fill: #ffffff;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .source {
+        fill: #e8896a;
+      }
+
+      .derived {
+        fill: #7bbf8e;
+      }
+
+      /* 深色下的 D 是亮绿，+ 用深绿才压得住。 */
+      .plus {
+        fill: #1e5133;
+      }
+    }
+  </style>
+  <g transform="translate(32 -1.5) scale(-1 1)">
+    <path class="source" d="M18.5 6 H23 A7 7 0 0 1 30 13 V19 A7 7 0 0 1 23 26 H18.5 A1.5 1.5 0 0 1 17 24.5 V7.5 A1.5 1.5 0 0 1 18.5 6 Z" />
+  </g>
+  <g transform="translate(0 1.5)">
+    <path class="derived" d="M18.5 6 H23 A7 7 0 0 1 30 13 V19 A7 7 0 0 1 23 26 H18.5 A1.5 1.5 0 0 1 17 24.5 V7.5 A1.5 1.5 0 0 1 18.5 6 Z" />
+    <path class="plus" d="M21.5 12 H24.5 V14.5 H27 V17.5 H24.5 V20 H21.5 V17.5 H19 V14.5 H21.5 Z" />
+  </g>
+</svg>

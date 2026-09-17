@@ -124,25 +124,36 @@ test('空 message 拒绝提交', async () => {
   assert.match(result.error ?? '', /空的/);
 });
 
-test('没暂存就不提交；暂存后可以取消暂存', async () => {
+test('没暂存也能提交：整层 add 之后再提交', async () => {
   const dir = await createRepo();
   const store = await DocStore.open(dir, {watch: false});
 
   try {
     await store.write('source/decisions', '# 决定\n\n还没暂存。\n');
 
-    const refused = await gitCommit(dir, dir, '未暂存');
-    assert.equal(refused.ok, false);
-    assert.match(refused.error ?? '', /暂存/);
+    const committed = await gitCommit(dir, dir, '没暂存也提交');
+    assert.equal(committed.ok, true);
+    assert.equal((await gitStatus(dir, dir)).changes.length, 0);
+  } finally {
+    await store.close();
+  }
+});
 
-    await gitStage(dir, dir);
+test('暂存了一部分就只提交那部分；可以取消暂存', async () => {
+  const dir = await createRepo();
+  const store = await DocStore.open(dir, {watch: false});
+
+  try {
+    await store.write('source/decisions', '# 决定\n\n还没暂存。\n');
+
+    await gitStage(dir, dir, 'source/decisions.md');
     assert.deepEqual(
       (await gitStatus(dir, dir)).changes.map(change => change.index),
       ['A'],
     );
     assert.match(await gitShowStaged(dir, dir, 'source/decisions.md'), /还没暂存/);
 
-    await gitUnstage(dir, dir);
+    await gitUnstage(dir, dir, 'source/decisions.md');
     assert.equal(await gitShowStaged(dir, dir, 'source/decisions.md'), '');
     assert.deepEqual(
       (await gitStatus(dir, dir)).changes.map(change => change.path),

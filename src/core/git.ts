@@ -298,12 +298,26 @@ export async function gitCommit(
     run(root, ['status', '--porcelain', '--untracked-files=all', '--', ...scopes]),
     docsPrefix(root, docs),
   ]);
-  const staged = parsePorcelain(status.stdout, prefix).filter(
-    change => change.index !== ' ' && change.index !== '?',
-  );
+  const changes = parsePorcelain(status.stdout, prefix);
+  let staged = changes.filter(change => change.index !== ' ' && change.index !== '?');
 
   if (staged.length === 0) {
-    return {ok: false, error: '还没有暂存任何文档改动'};
+    // 没暂存过就把两层文档整体提交：提交不该逼人先点一次暂存。
+    const layers = [
+      ...new Set(changes.map(change => change.path.split('/')[0] ?? '')),
+    ].filter(layer => (LAYERS as readonly string[]).includes(layer));
+
+    if (layers.length === 0) {
+      return {ok: false, error: '没有未提交的文档改动'};
+    }
+
+    const add = await run(root, ['add', '--', ...layers.map(layer => filePathOf(root, docs, layer))]);
+
+    if (add.code !== 0) {
+      return {ok: false, error: add.stderr.trim() || 'git add 失败'};
+    }
+
+    staged = changes;
   }
 
   const targets = [
@@ -314,7 +328,7 @@ export async function gitCommit(
     ),
   ].map(layer => filePathOf(root, docs, layer));
 
-  // 只提交已经暂存的内容：不替用户 add，交什么由 stage 决定。
+  // 有暂存就只提交暂存的那几层；没暂存则是上面刚补上的一整层。
   const commit = await run(root, ['commit', '-m', trimmed, '--', ...targets]);
 
   if (commit.code !== 0) {

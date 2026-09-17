@@ -26,6 +26,7 @@ import {
 import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/diff.ts';
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
+import {api, ApiError, messageOf} from './api.ts';
 import {MarkdownDiff, MarkdownEditor, type Pick} from './editors.tsx';
 import {draftMessage, formatTime, shortenPath, statusLabel} from './format.ts';
 import {buildTree, countDocs, fileName, flattenTree, type TreeNode} from './tree.ts';
@@ -66,13 +67,10 @@ function DefaultWorkspace() {
 
   useEffect(() => {
     void (async () => {
-      const response = await fetch('/api/workspaces').catch(() => undefined);
-      const payload = response?.ok
-        ? ((await response.json()) as {defaultId: string})
-        : undefined;
+      const defaultId = await api.defaultWorkspace().catch(() => undefined);
 
-      if (payload?.defaultId) {
-        navigate(`/w/${payload.defaultId}/`, {replace: true});
+      if (defaultId) {
+        navigate(`/w/${defaultId}/`, {replace: true});
       } else {
         setFailed(true);
       }
@@ -143,12 +141,6 @@ function Workspace() {
   const workspaceId = params.ws ?? '';
   const selected = params['*'] ? decodeURIComponent(params['*']) : undefined;
   const gitOpen = pathname.endsWith('/changes');
-  /** 所有接口都带上当前工作区。 */
-  const wsQuery = useCallback(
-    (extra: Record<string, string> = {}) =>
-      new URLSearchParams({...extra, ...(workspaceId ? {ws: workspaceId} : {})}).toString(),
-    [workspaceId],
-  );
   const docUrl = useCallback(
     (id: string, options: {diff?: boolean} = {}) =>
       `/w/${workspaceId}/d/${id}${options.diff ? '?diff=1' : ''}`,
@@ -194,7 +186,7 @@ function Workspace() {
 
         if (pickSet.current) {
           pickSet.current = false;
-          void fetch(`/api/selection?${wsQuery()}`, {method: 'DELETE'}).catch(() => undefined);
+          void api.clearSelection(workspaceId).catch(() => undefined);
         }
 
         return;
@@ -211,25 +203,19 @@ function Workspace() {
             return;
           }
 
-          const response = await fetch(`/api/selection?${wsQuery()}`, {
-            method: 'PUT',
-            headers: {'content-type': 'application/json'},
-            body: JSON.stringify({
+          await api
+            .putSelection(workspaceId, {
               doc: id,
               from: pick.from,
               to: pick.to,
               quote: pick.text,
               ...(doc?.id === id ? {revision: doc.revision} : {}),
-            }),
-          }).catch(() => undefined);
-
-          if (!response?.ok) {
-            return;
-          }
+            })
+            .catch(() => undefined);
         })();
       }, 300);
     },
-    [doc, gitFile, gitOpen, selected, wsQuery],
+    [doc, gitFile, gitOpen, selected, workspaceId],
   );
 
   const stateRef = useRef({doc, draft, selected});
@@ -323,49 +309,48 @@ function Workspace() {
   }, [tree]);
 
   const loadDocs = useCallback(async () => {
-    const response = await fetch(`/api/docs?${wsQuery()}`);
-    const payload = (await response.json()) as {docs: DocMeta[]};
-    setDocs(payload.docs);
-    return payload.docs;
-  }, [wsQuery]);
+    const list = await api.docs(workspaceId);
+    setDocs(list);
+    return list;
+  }, [workspaceId]);
 
   const loadWorkspaces = useCallback(async () => {
-    const response = await fetch('/api/workspaces');
+    const payload = await api.workspaces().catch(() => undefined);
 
-    if (!response.ok) {
-      return;
+    if (payload) {
+      setWorkspaceList(payload.workspaces);
     }
-
-    setWorkspaceList(((await response.json()) as {workspaces: typeof workspaceList}).workspaces);
   }, []);
 
   useEffect(() => {
     void (async () => {
-      const response = await fetch(`/api/health?${wsQuery()}`);
+      const payload = await api.workspace(workspaceId).catch(() => undefined);
 
-      if (!response.ok) {
+      if (!payload) {
         return;
       }
 
-      const payload = (await response.json()) as {root: string; docs: string};
       const name = payload.root.split('/').filter(Boolean).pop() ?? payload.root;
       setWorkspace({root: payload.root, docs: payload.docs, name});
       document.title = `${name} · derivedoc`;
     })();
     void loadWorkspaces();
-  }, [wsQuery, loadWorkspaces]);
+  }, [workspaceId, loadWorkspaces]);
 
   const loadDoc = useCallback(async (id: string) => {
-    const response = await fetch(`/api/doc?${wsQuery({id})}`);
+    let payload: Doc;
 
-    if (!response.ok) {
+    try {
+      payload = await api.doc(workspaceId, id);
+    } catch (error) {
       setStatus(
-        response.status === 404 ? `${id} 不存在或已被删除` : `读取失败：${response.status}`,
+        error instanceof ApiError && error.status === 404
+          ? `${id} 不存在或已被删除`
+          : `读取失败：${messageOf(error)}`,
       );
       return undefined;
     }
 
-    const payload = (await response.json()) as Doc;
     setDoc(payload);
     setIncoming(undefined);
     setShowIncoming(false);
@@ -375,22 +360,20 @@ function Workspace() {
       return next;
     });
     return payload;
-  }, [wsQuery]);
+  }, [workspaceId]);
 
   const loadBacklinks = useCallback(async (id: string) => {
-    const response = await fetch(`/api/backlinks?${wsQuery({id})}`);
-    setBacklinks(response.ok ? ((await response.json()) as {docs: DocMeta[]}).docs : []);
-  }, [wsQuery]);
+    setBacklinks(await api.backlinks(workspaceId, id).catch(() => []));
+  }, [workspaceId]);
 
   const loadGit = useCallback(async (options: {keepMessage?: boolean} = {}) => {
-    const response = await fetch(`/api/git/status?${wsQuery()}`);
+    const payload = await api.gitStatus(workspaceId).catch(() => undefined);
 
-    if (!response.ok) {
+    if (!payload) {
       setGit(undefined);
       return undefined;
     }
 
-    const payload = (await response.json()) as GitStatus;
     setGit(payload);
 
     if (!options.keepMessage) {
@@ -398,32 +381,28 @@ function Workspace() {
     }
 
     return payload;
-  }, [wsQuery]);
+  }, [workspaceId]);
 
   const loadGitDiff = useCallback(async (file?: string, base: 'head' | 'index' = 'head') => {
-    const query = file ? `?path=${encodeURIComponent(file)}` : '';
-    const response = await fetch(`/api/git/diff?${wsQuery({...file ? {path: file} : {}, base})}`);
+    let text: string;
 
-    if (!response.ok) {
+    try {
+      text = await api.gitDiff(workspaceId, file, base);
+    } catch {
       setGitDiffText('');
       setGitSides(undefined);
       return;
     }
 
-    setGitDiffText(((await response.json()) as {diff: string}).diff);
+    setGitDiffText(text);
 
     if (!file) {
       setGitSides(undefined);
       return;
     }
 
-    const sides = await fetch(`/api/git/show?${wsQuery({path: file, ...(base === 'index' ? {base: 'index'} : {})})}`);
-    setGitSides(
-      sides.ok
-        ? ((await sides.json()) as {original: string; modified: string})
-        : undefined,
-    );
-  }, [wsQuery]);
+    setGitSides(await api.gitShow(workspaceId, file, base).catch(() => undefined));
+  }, [workspaceId]);
 
   useEffect(() => {
     void loadDocs().then(list => {
@@ -463,23 +442,17 @@ function Workspace() {
     setShowProvenance(false);
 
     void (async () => {
-      const response = await fetch(`/api/conversations?${wsQuery({doc: selected})}`);
-
-      if (!response.ok) {
-        return;
-      }
-
-      const payload = (await response.json()) as {conversations: ConversationRecord[]};
+      const payload = await api.conversations(workspaceId, selected).catch(() => undefined);
 
       if (!cancelled) {
-        setProvenance(payload.conversations);
+        setProvenance(payload ?? []);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [selected]);
+  }, [selected, workspaceId]);
 
   /** 单个文档的 diff：以暂存区为基准，对比当前编辑器内容。 */
   const loadFileDiff = useCallback(async () => {
@@ -487,17 +460,18 @@ function Workspace() {
       return;
     }
 
-    const response = await fetch(`/api/git/show?${wsQuery({path: doc.relPath, base: 'index'})}`);
+    let payload: {original: string; modified: string};
 
-    if (!response.ok) {
+    try {
+      payload = await api.gitShow(workspaceId, doc.relPath, 'index');
+    } catch {
       setStatus(`读不到 ${doc.relPath} 的已提交版本`);
       setFileDiff(undefined);
       return;
     }
 
-    const payload = (await response.json()) as {original: string};
     setFileDiff({original: payload.original, modified: stateRef.current.draft});
-  }, [doc, wsQuery]);
+  }, [doc, workspaceId]);
 
   useEffect(() => {
     if (diffMode === 'file') {
@@ -537,9 +511,11 @@ function Workspace() {
         return;
       }
 
-      const response = await fetch(`/api/doc?id=${encodeURIComponent(change.id)}`);
+      let fresh: Doc;
 
-      if (!response.ok) {
+      try {
+        fresh = await api.doc(workspaceId, change.id);
+      } catch {
         if (change.type === 'deleted') {
           // 正在看的文档被删掉了：不要继续显示旧内容。
           setDoc(undefined);
@@ -551,7 +527,6 @@ function Workspace() {
         return;
       }
 
-      const fresh = (await response.json()) as Doc;
       const pending = pendingWriteRef.current;
 
       if (pending && pending.id === fresh.id && pending.body === fresh.body) {
@@ -610,22 +585,17 @@ function Workspace() {
     setStatus('保存中…', 'save');
     pendingWriteRef.current = {id: current.doc.id, body: current.draft};
 
-    const response = await fetch(`/api/doc?${wsQuery({id: current.doc.id})}`, {
-      method: 'PUT',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({content: current.draft, baseRevision: current.doc.revision}),
-    });
-
-    const payload = (await response.json()) as {revision?: string; error?: {message: string}};
-    setBusy(false);
-
-    if (!response.ok) {
+    try {
+      await api.writeDoc(workspaceId, current.doc.id, current.draft, current.doc.revision);
+    } catch (error) {
       pendingWriteRef.current = undefined;
-      setStatus(`保存失败：${payload.error?.message ?? response.status}`, 'save');
+      setBusy(false);
+      setStatus(`保存失败：${messageOf(error)}`, 'save');
       await loadDoc(current.doc.id);
       return;
     }
 
+    setBusy(false);
     setStatus('已保存', 'save');
     await loadDoc(current.doc.id);
     await loadDocs();
@@ -642,15 +612,15 @@ function Workspace() {
     }
 
     const timer = setTimeout(async () => {
-      const response = await fetch(`/api/search?${wsQuery({q: query})}`);
+      const found = await api.search(workspaceId, query).catch(() => undefined);
 
-      if (response.ok) {
-        setHits(((await response.json()) as {hits: SearchHit[]}).hits);
+      if (found) {
+        setHits(found);
       }
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [filter]);
+  }, [filter, workspaceId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -748,23 +718,20 @@ function Workspace() {
     }
 
     setBusy(true);
-    const response = await fetch(`/api/doc?${wsQuery({id})}`, {
-      method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({content: `# ${id.split('/').pop()}\n\n`}),
-    });
-    setBusy(false);
 
-    if (!response.ok) {
-      const payload = (await response.json()) as {error?: {message: string}};
+    try {
+      await api.createDoc(workspaceId, id, `# ${id.split('/').pop()}\n\n`);
+    } catch (error) {
+      setBusy(false);
       setStatus(
-        response.status === 400 && /已存在/.test(payload.error?.message ?? '')
+        error instanceof ApiError && error.status === 400 && /已存在/.test(messageOf(error))
           ? `已存在同名文档：${id}`
-          : `创建失败：${payload.error?.message ?? response.status}`,
+          : `创建失败：${messageOf(error)}`,
       );
       return;
     }
 
+    setBusy(false);
     cancelCreate();
     await loadDocs();
     // 新文档先展开它所在的目录，再进编辑器（而不是 diff）。
@@ -790,14 +757,16 @@ function Workspace() {
 
     setConfirmingDelete(false);
     setBusy(true);
-    const response = await fetch(`/api/doc?${wsQuery({id: doc.id})}`, {method: 'DELETE'});
-    setBusy(false);
 
-    if (!response.ok) {
-      setStatus(`删除失败：${response.status}`);
+    try {
+      await api.removeDoc(workspaceId, doc.id);
+    } catch (error) {
+      setBusy(false);
+      setStatus(`删除失败：${messageOf(error)}`);
       return;
     }
 
+    setBusy(false);
     setStatus(`${doc.id} 已删除`);
     setDoc(undefined);
     const list = await loadDocs();
@@ -813,20 +782,15 @@ function Workspace() {
   const stage = async (path?: string, unstage = false) => {
     setGitBusy(true);
 
-    const response = await fetch('/api/git/stage', {
-      method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({...(path ? {path} : {}), ...(unstage ? {unstage: true} : {})}),
-    });
-
-    setGitBusy(false);
-
-    if (!response.ok) {
+    try {
+      setGit(await api.stage(workspaceId, path, unstage));
+    } catch {
+      setGitBusy(false);
       setStatus(unstage ? '取消暂存失败' : '暂存失败');
       return;
     }
 
-    setGit((await response.json()) as GitStatus);
+    setGitBusy(false);
     await loadGitDiff(gitFile);
 
     // 文档页的 diff 以暂存区为基准，暂存之后它得跟着变。
@@ -838,17 +802,20 @@ function Workspace() {
   const commit = async () => {
     setGitBusy(true);
 
-    const response = await fetch('/api/git/commit', {
-      method: 'POST',
-      headers: {'content-type': 'application/json'},
-      body: JSON.stringify({message: gitMessage}),
-    });
+    let payload: {ok: boolean; sha?: string; error?: string};
 
-    const payload = (await response.json()) as {ok?: boolean; sha?: string; error?: string};
+    try {
+      payload = await api.commit(workspaceId, gitMessage);
+    } catch (error) {
+      setGitBusy(false);
+      setStatus(`提交失败：${messageOf(error)}`);
+      return;
+    }
+
     setGitBusy(false);
 
-    if (!response.ok || !payload.ok) {
-      setStatus(`提交失败：${payload.error ?? response.status}`);
+    if (!payload.ok) {
+      setStatus(`提交失败：${payload.error ?? '未知原因'}`);
       return;
     }
 
@@ -1145,21 +1112,14 @@ function Workspace() {
                     onSubmit={event => {
                       event.preventDefault();
                       void (async () => {
-                        const response = await fetch('/api/workspaces', {
-                          method: 'POST',
-                          headers: {'content-type': 'application/json'},
-                          body: JSON.stringify({
-                            root: newWorkspace.trim(),
-                            docs: newDocs.trim(),
-                          }),
-                        });
-                        const payload = (await response.json()) as {
-                          workspace?: {id: string};
-                          error?: {message: string};
-                        };
+                        let added: {id: string};
 
-                        if (!response.ok || !payload.workspace) {
-                          setStatus(`添加失败：${payload.error?.message ?? response.status}`);
+                        try {
+                          added = (
+                            await api.addWorkspace(newWorkspace.trim(), newDocs.trim())
+                          ).workspace;
+                        } catch (error) {
+                          setStatus(`添加失败：${messageOf(error)}`);
                           return;
                         }
 
@@ -1167,7 +1127,7 @@ function Workspace() {
                         setNewDocs('');
                         setSwitcherOpen(false);
                         await loadWorkspaces();
-                        navigate(`/w/${payload.workspace.id}/`);
+                        navigate(`/w/${added.id}/`);
                       })();
                     }}
                   >

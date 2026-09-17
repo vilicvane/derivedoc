@@ -40,8 +40,8 @@
     --paper-sunken: #201d19;
     --ink: #ece6da;
     --ink-2: #c6bdae;
-    --ink-3: #918878;
-    --ink-4: #6b6355;
+    --ink-3: #a89d8a;
+    --ink-4: #8a8071;
     --rule: #2c2925;
     --rule-strong: #3d3932;
     --source: #e8896a;
@@ -156,6 +156,18 @@ textarea {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+.results-head {
+  align-items: baseline;
+  color: var(--ink-3);
+  display: flex;
+  font-size: 0.72rem;
+  font-weight: 620;
+  gap: 0.4rem;
+  letter-spacing: 0.03em;
+  margin: 1.35rem 0 0.4rem;
+  padding: 0 0.3rem;
 }
 
 .folder-row {
@@ -399,11 +411,33 @@ textarea {
 
 .hits button {
   align-items: flex-start;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  cursor: pointer;
+  display: flex;
   flex-direction: column;
-  gap: 0.08rem;
+  font: inherit;
+  gap: 0.1rem;
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+  transition: background var(--dur) var(--ease);
+  width: 100%;
+}
+
+.hits button:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+
+.hits button.active {
+  background: var(--paper-raised);
 }
 
 .hit-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -412,10 +446,10 @@ textarea {
 .hit-snippet {
   color: var(--ink-4);
   font-size: 0.68rem;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  width: 100%;
 }
 
 .empty {
@@ -561,6 +595,26 @@ textarea {
   padding: 0.45rem 0.6rem;
 }
 
+.banner.danger {
+  background: var(--danger-soft);
+  border-bottom-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.banner.danger button:first-of-type {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.banner.danger button:first-of-type:hover {
+  background: color-mix(in srgb, var(--danger) 88%, #000);
+}
+
+.banner code {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+
 .relations {
   align-items: baseline;
   border-bottom: 1px solid var(--rule);
@@ -616,6 +670,17 @@ textarea {
   color: var(--ink-4);
   font-size: 0.7rem;
   margin: 0.3rem 0 0;
+}
+
+.editor-loading {
+  align-items: center;
+  background: var(--paper-raised);
+  color: var(--ink-4);
+  display: flex;
+  font-size: 0.78rem;
+  height: 100%;
+  justify-content: center;
+  letter-spacing: 0.02em;
 }
 
 .diff {
@@ -900,6 +965,17 @@ textarea {
   font-size: 0.74rem;
   gap: 0.4rem 1.1rem;
   justify-content: center;
+}
+
+.placeholder-action {
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  color: var(--paper-raised);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.8rem;
 }
 
 kbd {

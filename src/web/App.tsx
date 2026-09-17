@@ -102,6 +102,13 @@ function buildTree(docs: DocMeta[]): TreeNode[] {
   const roots: TreeNode[] = [];
   const nodes = new Map<string, TreeNode>();
 
+  // 两个根始终存在：空项目也要有新建入口，并让层级结构可见。
+  for (const kind of ['source', 'derived'] as const) {
+    const root: TreeNode = {name: kind, path: kind, kind, depth: 0, children: []};
+    nodes.set(kind, root);
+    roots.push(root);
+  }
+
   for (const doc of [...docs].sort((a, b) => a.id.localeCompare(b.id))) {
     const segments = doc.id.split('/');
     let list = roots;
@@ -178,6 +185,7 @@ function Workspace() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [git, setGit] = useState<GitStatus>();
   const [gitFile, setGitFile] = useState<string>();
@@ -237,6 +245,9 @@ function Workspace() {
     () => new Map((git?.changes ?? []).map(change => [change.path, change])),
     [git],
   );
+
+  /** 路由里的 id 不在文档列表里：多半是失效链接。 */
+  const missingDoc = Boolean(selected) && docs.length > 0 && !docs.some(item => item.id === selected);
 
   const tree = useMemo(() => buildTree(docs), [docs]);
 
@@ -612,10 +623,7 @@ function Workspace() {
       return;
     }
 
-    if (!window.confirm(`删除 ${doc.id}？这个操作直接从磁盘删文件。`)) {
-      return;
-    }
-
+    setConfirmingDelete(false);
     setBusy(true);
     const response = await fetch(`/api/doc?id=${encodeURIComponent(doc.id)}`, {method: 'DELETE'});
     setBusy(false);
@@ -893,11 +901,11 @@ function Workspace() {
           />
         </div>
         {hits ? (
-          <section>
-            <h2>
+          <section className="results">
+            <p className="results-head">
               <span>搜索结果</span>
               <span className="count">{hits.length}</span>
-            </h2>
+            </p>
             <ul className="hits">
               {hits.map(hit => (
                 <li key={hit.id}>
@@ -1049,7 +1057,12 @@ function Workspace() {
                   <RotateCw size={14} />
                   重新载入
                 </button>
-                <button className="danger" onClick={() => void removeDoc()} title="删除这篇文档" type="button">
+                <button
+                  className="danger"
+                  onClick={() => setConfirmingDelete(true)}
+                  title="删除这篇文档"
+                  type="button"
+                >
                   <Trash2 size={14} />
                   删除
                 </button>
@@ -1089,6 +1102,20 @@ function Workspace() {
                   type="button"
                 >
                   用磁盘版本
+                </button>
+              </div>
+            )}
+
+            {confirmingDelete && (
+              <div className="banner danger">
+                <span>
+                  删除 <code>{doc.relPath}</code>？
+                </span>
+                <button onClick={() => void removeDoc()} type="button">
+                  确认删除
+                </button>
+                <button onClick={() => setConfirmingDelete(false)} type="button">
+                  取消
                 </button>
               </div>
             )}
@@ -1139,7 +1166,22 @@ function Workspace() {
           </div>
         ) : !gitOpen ? (
           <div className="placeholder">
-            <p>左侧选一篇文档开始。</p>
+            <p>{missingDoc ? `找不到这篇文档：${selected}` : docs.length === 0 ? '还没有任何文档。点左侧 source 的 ＋，写下第一条决定。' : '左侧选一篇文档开始。'}</p>
+            {missingDoc && (
+              <button
+                className="placeholder-action"
+                onClick={() => {
+                  const first = docs.find(item => item.kind === 'source') ?? docs[0];
+
+                  if (first) {
+                    openDoc(first.id);
+                  }
+                }}
+                type="button"
+              >
+                回到第一篇
+              </button>
+            )}
             <div className="keys">
               <span>
                 <kbd>↑</kbd> <kbd>↓</kbd> 切换文档

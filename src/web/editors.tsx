@@ -136,6 +136,11 @@ export function MarkdownEditor({
     <div className="editor">
       <Editor
         language="markdown"
+        loading={
+          <div className="editor-loading">
+            <span>正在加载编辑器…</span>
+          </div>
+        }
         onChange={next => onChange(next ?? '')}
         onMount={editor => {
           if (autoFocus) {
@@ -167,6 +172,11 @@ export function MarkdownDiff({
     <div className="editor">
       <DiffEditor
         language="markdown"
+        loading={
+          <div className="editor-loading">
+            <span>正在加载编辑器…</span>
+          </div>
+        }
         modified={modified}
         options={{
           ...EDITOR_OPTIONS,

@@ -376,9 +376,17 @@ function Workspace() {
 
     void (async () => {
       const response = await fetch(`/api/git/show?path=${encodeURIComponent(doc.relPath)}`);
-      const payload = response.ok
-        ? ((await response.json()) as {original: string})
-        : {original: ''};
+
+      if (!response.ok) {
+        if (!cancelled) {
+          setStatus(`读不到 ${doc.relPath} 的已提交版本`);
+          setFileDiff(undefined);
+        }
+
+        return;
+      }
+
+      const payload = (await response.json()) as {original: string};
 
       if (!cancelled) {
         setFileDiff({original: payload.original, modified: stateRef.current.draft});

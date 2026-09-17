@@ -116,7 +116,13 @@ export function createApp(store: DocStore): Hono {
       }
 
       const modified = await fsp.readFile(absolute, 'utf8').catch(() => '');
-      return c.json({original: await gitShow(store.root, file), modified});
+      const original = await gitShow(store.root, file);
+
+      if (!modified && !original) {
+        return c.json({error: {code: 'not_found', message: `文件不存在：${file}`}}, 404);
+      }
+
+      return c.json({original, modified});
     } catch (error) {
       return errorResponse(error);
     }
@@ -151,6 +157,7 @@ export function createApp(store: DocStore): Hono {
         id: doc.id,
         kind: doc.kind,
         title: doc.title,
+        relPath: doc.relPath,
         revision: doc.revision,
         updatedAt: doc.updatedAt,
         links: doc.links,
@@ -242,7 +249,11 @@ export function createApp(store: DocStore): Hono {
     try {
       const body = await fsp.readFile(filePath);
       const type = CONTENT_TYPES[path.extname(filePath)] ?? 'application/octet-stream';
-      return new Response(new Uint8Array(body), {headers: {'content-type': type}});
+      // 带哈希的静态资源可以长缓存，index.html 必须每次校验，否则界面会停在旧版本上。
+      const cache = relative === '/index.html' ? 'no-store' : 'public, max-age=31536000, immutable';
+      return new Response(new Uint8Array(body), {
+        headers: {'content-type': type, 'cache-control': cache},
+      });
     } catch {
       // SPA 路由：不是静态资源的路径一律交给前端路由，用 index.html 兜底。
       const isAsset = path.extname(relative) !== '';
@@ -254,7 +265,7 @@ export function createApp(store: DocStore): Hono {
 
         if (fallback) {
           return new Response(new Uint8Array(fallback), {
-            headers: {'content-type': 'text/html; charset=utf-8'},
+            headers: {'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store'},
           });
         }
       }

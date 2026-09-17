@@ -27,185 +27,26 @@ import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/dif
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
 import {MarkdownDiff, MarkdownEditor, type Pick} from './editors.tsx';
+import {draftMessage, formatTime, shortenPath, statusLabel} from './format.ts';
+import {buildTree, countDocs, fileName, flattenTree, type TreeNode} from './tree.ts';
+import {
+  hasUnstaged,
+  isStaged,
+  type Change,
+  type ConversationRecord,
+  type Doc,
+  type DocKind,
+  type DocMeta,
+  type GitChange,
+  type GitStatus,
+  type Incoming,
+  type SearchHit,
+  type Toast,
+  type WorkspaceInfo,
+  type WorkspaceRef,
+} from './types.ts';
 
 const markdown = new MarkdownIt({html: false, linkify: true});
-
-function draftMessage(changes: GitChange[]): string {
-  if (changes.length === 0) {
-    return '';
-  }
-
-  const [first] = changes;
-  return changes.length === 1
-    ? `更新 ${first!.path}`
-    : `更新 ${first!.path} 等 ${changes.length} 个文档`;
-}
-
-type DocKind = 'source' | 'derived';
-
-interface DocMeta {
-  id: string;
-  kind: DocKind;
-  title: string;
-  relPath: string;
-  revision: string;
-  updatedAt: string;
-  links: string[];
-}
-
-interface Doc extends DocMeta {
-  body: string;
-}
-
-interface Change {
-  type: 'created' | 'changed' | 'deleted';
-  id: string;
-  revision: string;
-}
-
-interface Incoming {
-  id: string;
-  revision: string;
-  body: string;
-}
-
-interface Toast {
-  id: number;
-  kind: 'ok' | 'info' | 'warn' | 'error';
-  text: string;
-  /** 同 key 的提示原地更新（比如「保存中…」变成「已保存」），不再叠一条。 */
-  key?: string;
-}
-
-interface ConversationRecord {
-  type: 'message';
-  at: string;
-  sessionId: string;
-  turnId?: string;
-  channel: string;
-  text: string;
-  captures: Array<{
-    changed: string[];
-    thinking?: string;
-    elapsedMs: number;
-    code: number;
-  }>;
-}
-
-interface SearchHit extends DocMeta {
-  snippet: string;
-}
-
-interface GitChange {
-  path: string;
-  index: string;
-  worktree: string;
-  added?: number;
-  removed?: number;
-}
-
-interface GitStatus {
-  available: boolean;
-  reason?: string;
-  branch?: string;
-  changes: GitChange[];
-  message?: string;
-  otherChanges: number;
-}
-
-/** 工作区里还有没进暂存区的改动（含未跟踪）。 */
-function hasUnstaged(change: GitChange): boolean {
-  return change.worktree !== ' ' || change.index === '?';
-}
-
-/** 已经有内容在暂存区里。 */
-function isStaged(change: GitChange): boolean {
-  return change.index !== ' ' && change.index !== '?';
-}
-
-interface TreeNode {
-  name: string;
-  path: string;
-  kind: DocKind;
-  depth: number;
-  children: TreeNode[];
-  doc?: DocMeta;
-}
-
-function buildTree(docs: DocMeta[]): TreeNode[] {
-  const roots: TreeNode[] = [];
-  const nodes = new Map<string, TreeNode>();
-
-  // 两个根始终存在：空项目也要有新建入口，并让层级结构可见。
-  for (const kind of ['source', 'derived'] as const) {
-    const root: TreeNode = {name: kind, path: kind, kind, depth: 0, children: []};
-    nodes.set(kind, root);
-    roots.push(root);
-  }
-
-  for (const doc of [...docs].sort((a, b) => a.id.localeCompare(b.id))) {
-    const segments = doc.id.split('/');
-    let list = roots;
-    let prefix = '';
-
-    segments.forEach((segment, index) => {
-      prefix = prefix ? `${prefix}/${segment}` : segment;
-      let node = nodes.get(prefix);
-
-      if (!node) {
-        node = {name: segment, path: prefix, kind: doc.kind, depth: index, children: []};
-        nodes.set(prefix, node);
-        list.push(node);
-      }
-
-      if (index === segments.length - 1) {
-        node.doc = doc;
-      }
-
-      list = node.children;
-    });
-  }
-
-  // source 在前：界面主要给用户看，用户关心的是自己定下的东西。
-  const layerOrder: Record<DocKind, number> = {source: 0, derived: 1};
-  const sortNodes = (list: TreeNode[]): TreeNode[] =>
-    list.sort((a, b) => {
-      const layer = layerOrder[a.kind] - layerOrder[b.kind];
-
-      if (a.depth === 0 && layer !== 0) {
-        return layer;
-      }
-
-      // 文件夹排在文件前面：先扫结构，再看具体是哪篇。
-      const folder = (a.doc ? 1 : 0) - (b.doc ? 1 : 0);
-      return folder !== 0 ? folder : a.name.localeCompare(b.name);
-    });
-
-  sortNodes(roots);
-
-  for (const node of nodes.values()) {
-    if (node.children.length > 0) {
-      sortNodes(node.children);
-    }
-  }
-
-  return roots;
-}
-
-function fileName(id: string): string {
-  return `${id.split('/').pop() ?? id}.md`;
-}
-
-function formatTime(iso: string): string {
-  const date = new Date(iso);
-
-  if (Number.isNaN(date.getTime())) {
-    return iso;
-  }
-
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
 
 export function App() {
   return (
@@ -1026,24 +867,6 @@ function Workspace() {
     }
   };
 
-  const statusLabel = (change: GitChange): string => {
-    const code = change.index !== ' ' && change.index !== '?' ? change.index : change.worktree;
-
-    switch (code) {
-      case '?':
-      case 'A':
-        return '新增';
-      case 'M':
-        return '修改';
-      case 'D':
-        return '删除';
-      case 'R':
-        return '改名';
-      default:
-        return code;
-    }
-  };
-
   const titleOf = useMemo(() => {
     const map = new Map(docs.map(item => [item.id, item.title]));
     return (id: string) => map.get(id) ?? id;
@@ -1248,32 +1071,6 @@ function Workspace() {
         </button>
       </li>
     );
-  };
-
-  const countDocs = (node: TreeNode): number =>
-    node.doc ? 1 : node.children.reduce((sum, child) => sum + countDocs(child), 0);
-
-  /** 路径太长时留尾部的完整层级——工作区靠目录名区分，截头比截尾有用。 */
-  const shortenPath = (path: string, max = 26) => {
-    if (path.length <= max) {
-      return path;
-    }
-
-    const parts = path.split('/').filter(Boolean);
-    let tail = '';
-
-    for (let index = parts.length - 1; index >= 0; index -= 1) {
-      const part = parts[index] ?? '';
-      const next = tail ? `${part}/${tail}` : part;
-
-      if (tail && next.length + 1 > max) {
-        break;
-      }
-
-      tail = next;
-    }
-
-    return `…/${tail}`;
   };
 
   return (

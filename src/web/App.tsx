@@ -172,6 +172,7 @@ function Workspace() {
   const [backlinks, setBacklinks] = useState<DocMeta[]>([]);
   const [filter, setFilter] = useState('');
   const [creating, setCreating] = useState<DocKind>();
+  const [creatingFolder, setCreatingFolder] = useState<string>();
   const [newId, setNewId] = useState('');
   const [fileDiff, setFileDiff] = useState<{original: string; modified: string}>();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -505,6 +506,16 @@ function Workspace() {
       if (event.key === 'Escape') {
         setIncoming(undefined);
 
+        if (gitOpen) {
+          if (selected) {
+            openDoc(selected);
+          } else {
+            navigate('/');
+          }
+
+          return;
+        }
+
         if (searchParams.get('diff') === '1' && selected) {
           navigate(`/d/${selected}`, {replace: true});
         }
@@ -542,11 +553,18 @@ function Workspace() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [save, flatDocs]);
+  }, [save, flatDocs, gitOpen, selected, openDoc, navigate, searchParams]);
+
+  const cancelCreate = () => {
+    setCreating(undefined);
+    setCreatingFolder(undefined);
+    setNewId('');
+  };
 
   const createDoc = async (kind: DocKind) => {
+    const base = creatingFolder ?? kind;
     const id = newId.trim().replace(/\.md$/i, '');
-    const fullId = id.includes('/') ? id : `${kind}/${id}`;
+    const fullId = id.includes('/') ? id : `${base}/${id}`;
 
     if (!id) {
       setStatus('先填一个 id');
@@ -571,8 +589,7 @@ function Workspace() {
       return;
     }
 
-    setCreating(undefined);
-    setNewId('');
+    cancelCreate();
     await loadDocs();
     // 新文档先展开它所在的目录，再进编辑器（而不是 diff）。
     setCollapsed(current => {
@@ -769,11 +786,11 @@ function Workspace() {
   };
 
   const renderNode = (node: TreeNode) => {
-    const indent = {paddingLeft: `${0.4 + node.depth * 0.9}rem`};
+    const isRoot = node.depth === 0;
+    const indent = {paddingLeft: `${0.35 + node.depth * 1.15}rem`};
 
     if (!node.doc) {
       const open = !collapsed.has(node.path);
-      const isRoot = node.depth === 0;
       const label =
         isRoot
           ? node.name === 'source'
@@ -782,27 +799,51 @@ function Workspace() {
           : node.name;
 
       return (
-        <li key={node.path}>
+        <li className={isRoot ? 'tree-root' : 'tree-folder'} key={node.path}>
           <div className={`folder-row layer-${node.kind}`} style={indent}>
             <button className="folder" onClick={() => toggleFolder(node.path)} type="button">
               <span className={`chev${open ? '' : ' collapsed'}`}>▾</span>
               <span className="folder-name">{label}</span>
-              <span className="count">{countDocs(node)}</span>
+              {isRoot && <span className="count">{countDocs(node)}</span>}
             </button>
-            {isRoot && (
-              <button
-                className="ghost"
-                onClick={() => {
-                  setCreating(node.name as DocKind);
-                  setNewId('');
-                }}
-                title={`新建 ${node.name} 文档`}
-                type="button"
-              >
-                <Plus size={12} />
-              </button>
-            )}
+            <button
+              className="ghost"
+              onClick={() => {
+                setCreating(node.name as DocKind);
+                setCreatingFolder(node.path);
+                setNewId('');
+              }}
+              title={`在 ${node.path}/ 下新建文档`}
+              type="button"
+            >
+              <Plus size={12} />
+            </button>
           </div>
+          {creatingFolder === node.path && (
+            <form
+              className="create"
+              onSubmit={event => {
+                event.preventDefault();
+                void createDoc(node.name as DocKind);
+              }}
+              style={{paddingLeft: `${1.1 + node.depth * 1.15}rem`}}
+            >
+              <input
+                autoFocus
+                placeholder={`${node.path}/新文档`}
+                value={newId}
+                onChange={event => setNewId(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Escape') {
+                    cancelCreate();
+                  }
+                }}
+              />
+              <button aria-label="创建" disabled={busy} title="创建（回车）" type="submit">
+                <Check size={13} />
+              </button>
+            </form>
+          )}
           {open && node.children.length > 0 && <ul>{node.children.map(renderNode)}</ul>}
         </li>
       );
@@ -879,34 +920,10 @@ function Workspace() {
             {tree.length === 0 && <li className="empty">暂无文档</li>}
           </ul>
         )}
-        {creating && (
-          <form
-            className="create"
-            onSubmit={event => {
-              event.preventDefault();
-              void createDoc(creating);
-            }}
-          >
-            <input
-              autoFocus
-              placeholder={`${creating}/新文档`}
-              value={newId}
-              onChange={event => setNewId(event.target.value)}
-              onKeyDown={event => {
-                if (event.key === 'Escape') {
-                  setCreating(undefined);
-                }
-              }}
-            />
-            <button aria-label="创建" disabled={busy} type="submit" title="创建（回车）">
-              <Plus size={13} />
-            </button>
-          </form>
-        )}
       </aside>
       <main className="main">
         {gitOpen && (
-          <section className="git pane">
+          <section className="git pane pane-review">
             <header>
               <div>
                 <h2>审阅改动</h2>
@@ -997,7 +1014,7 @@ function Workspace() {
             )}
           </section>
         )}
-        {doc ? (
+        {!gitOpen && doc ? (
           <div className="pane">
             <header>
               <div>
@@ -1120,7 +1137,7 @@ function Workspace() {
               />
             )}
           </div>
-        ) : (
+        ) : !gitOpen ? (
           <div className="placeholder">
             <p>左侧选一篇文档开始。</p>
             <div className="keys">
@@ -1138,7 +1155,7 @@ function Workspace() {
               </span>
             </div>
           </div>
-        )}
+        ) : null}
       </main>
       <div className="toasts">
         {toasts.map(toast => (

@@ -29,6 +29,7 @@ import {resolveDocId} from '../core/links.ts';
 import {api, ApiError, messageOf} from './api.ts';
 import {ReviewPane} from './components/ReviewPane.tsx';
 import {useDocSession} from './hooks/useDocSession.ts';
+import {useDocDiff} from './hooks/useDocDiff.ts';
 import {useDocs} from './hooks/useDocs.ts';
 import {useGitReview} from './hooks/useGitReview.ts';
 import {useToasts} from './hooks/useToasts.ts';
@@ -95,7 +96,6 @@ function Workspace() {
   const [creating, setCreating] = useState<DocKind>();
   const [creatingFolder, setCreatingFolder] = useState<string>();
   const [newId, setNewId] = useState('');
-  const [fileDiff, setFileDiff] = useState<{original: string; modified: string}>();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -326,42 +326,13 @@ function Workspace() {
     return () => socket.close();
   }, [applyExternal, loadDocs, loadGit, workspaceId]);
 
-  /** 单个文档的 diff：以暂存区为基准，对比当前编辑器内容。 */
-  const loadFileDiff = useCallback(async () => {
-    if (!doc) {
-      return;
-    }
-
-    let payload: {original: string; modified: string};
-
-    try {
-      payload = await api.gitShow(workspaceId, doc.relPath, 'index');
-    } catch {
-      setStatus(`读不到 ${doc.relPath} 的已提交版本`);
-      setFileDiff(undefined);
-      return;
-    }
-
-    setFileDiff({original: payload.original, modified: stateRef.current.draft});
-  }, [doc, workspaceId]);
-
-  useEffect(() => {
-    if (diffMode === 'file') {
-      void loadFileDiff();
-    }
-  }, [diffMode, loadFileDiff]);
-
-
-
+  const docDiff = useDocDiff(workspaceId, doc, draft, diffMode === 'file');
 
 
   /** 文档页的暂存：和审阅页共用 stage，再补一次文档自己的 diff。 */
   const stageDoc = async (path: string, unstage = false) => {
     await stage(path, unstage);
-
-    if (diffMode === 'file') {
-      await loadFileDiff();
-    }
+    await docDiff.reload();
   };
 
   useEffect(() => {
@@ -484,14 +455,14 @@ function Workspace() {
     }
 
     if (diffMode === 'file') {
-      if (!fileDiff) {
+      if (!docDiff.sides) {
         return undefined;
       }
 
-      const lines = diffLines(fileDiff.original, fileDiff.modified);
+      const lines = diffLines(docDiff.sides.original, docDiff.sides.modified);
       return {
-        original: fileDiff.original,
-        modified: fileDiff.modified,
+        original: docDiff.sides.original,
+        modified: docDiff.sides.modified,
         summary: summarizeDiff(lines),
         caption: diffCaption,
       };
@@ -508,7 +479,7 @@ function Workspace() {
       summary: summarizeDiff(lines),
       caption: '磁盘上的新版本与你的草稿的差异',
     };
-  }, [doc, draft, diffMode, incoming, fileDiff, diffCaption]);
+  }, [doc, draft, diffMode, incoming, docDiff.sides, diffCaption]);
 
   const openLink = (id: string) => {
     if (docs.some(item => item.id === id)) {

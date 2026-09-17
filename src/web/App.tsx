@@ -252,12 +252,29 @@ function Workspace() {
   const [reviewBase, setReviewBase] = useState<'head' | 'index'>('head');
   const [gitMessage, setGitMessage] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
-  const [workspace, setWorkspace] = useState<{root: string; name: string}>();
-  const [workspaceList, setWorkspaceList] = useState<Array<{id: string; name: string; root: string; open: boolean}>>([]);
+  const [workspace, setWorkspace] = useState<{root: string; docs: string; name: string}>();
+  const [workspaceList, setWorkspaceList] = useState<
+    Array<{id: string; name: string; root: string; docs: string; open: boolean}>
+  >([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState('');
   const [provenance, setProvenance] = useState<ConversationRecord[]>([]);
   const [showProvenance, setShowProvenance] = useState(false);
+
+  useEffect(() => {
+    if (!switcherOpen) {
+      return;
+    }
+
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSwitcherOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [switcherOpen]);
 
   // 路由即状态：/d/<id> 看文档，?diff=1 看改动，/changes 看提交面板。
   const navigate = useNavigate();
@@ -376,9 +393,9 @@ function Workspace() {
         return;
       }
 
-      const payload = (await response.json()) as {root: string};
+      const payload = (await response.json()) as {root: string; docs: string};
       const name = payload.root.split('/').filter(Boolean).pop() ?? payload.root;
-      setWorkspace({root: payload.root, name});
+      setWorkspace({root: payload.root, docs: payload.docs, name});
       document.title = `${name} · derivedoc`;
     })();
     void loadWorkspaces();
@@ -456,7 +473,8 @@ function Workspace() {
 
   useEffect(() => {
     void loadDocs().then(list => {
-      if (pathname.startsWith('/changes') || selected) {
+      // 路由带工作区前缀（/w/<id>/changes），这里用结尾判断，否则深链接会被踢回文档。
+      if (pathname.endsWith('/changes') || selected) {
         return;
       }
 
@@ -1110,20 +1128,137 @@ function Workspace() {
   const countDocs = (node: TreeNode): number =>
     node.doc ? 1 : node.children.reduce((sum, child) => sum + countDocs(child), 0);
 
+  /** 路径太长时留尾部的完整层级——工作区靠目录名区分，截头比截尾有用。 */
+  const shortenPath = (path: string, max = 26) => {
+    if (path.length <= max) {
+      return path;
+    }
+
+    const parts = path.split('/').filter(Boolean);
+    let tail = '';
+
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const part = parts[index] ?? '';
+      const next = tail ? `${part}/${tail}` : part;
+
+      if (tail && next.length + 1 > max) {
+        break;
+      }
+
+      tail = next;
+    }
+
+    return `…/${tail}`;
+  };
+
   return (
     <div className="layout">
       <aside className="sidebar">
         <div className="brand">
-          <button
-            className={`workspace-pick${switcherOpen ? ' open' : ''}`}
-            onClick={() => setSwitcherOpen(value => !value)}
-            title={workspace?.root ?? ''}
-            type="button"
-          >
-            <span className="workspace-name">{workspace?.name ?? '…'}</span>
-            <span className="product-name">derivedoc</span>
-            <ChevronDown size={12} />
-          </button>
+          <div className="pick-wrap">
+            <button
+              aria-expanded={switcherOpen}
+              className={`workspace-pick${switcherOpen ? ' open' : ''}`}
+              onClick={() => {
+                setSwitcherOpen(value => !value);
+                void loadWorkspaces();
+              }}
+              title={
+                workspace
+                  ? `项目根　${workspace.root}\n文档目录　${workspace.docs}`
+                  : ''
+              }
+              type="button"
+            >
+              <span className="pick-kicker">工作区</span>
+              <span className="pick-row">
+                <span className="workspace-name">{workspace?.name ?? '…'}</span>
+                <ChevronDown className="pick-chevron" size={12} />
+              </span>
+            </button>
+            {switcherOpen && (
+              <>
+                <div className="switcher-backdrop" onClick={() => setSwitcherOpen(false)} />
+                <div aria-label="切换工作区" className="switcher" role="dialog">
+                  <p className="switcher-head">
+                    <span>切换到</span>
+                    <span className="switcher-count">{workspaceList.length}</span>
+                  </p>
+                  <ul className="switcher-list">
+                    {workspaceList.map(item => (
+                      <li key={item.id}>
+                        <button
+                          className={`switcher-item${item.id === workspaceId ? ' current' : ''}`}
+                          onClick={() => {
+                            setSwitcherOpen(false);
+
+                            if (item.id === workspaceId) {
+                              return;
+                            }
+
+                            navigate(`/w/${item.id}/`);
+                          }}
+                          title={`项目根　${item.root}\n文档目录　${item.docs}`}
+                          type="button"
+                        >
+                          <span className="switcher-text">
+                            <span className="switcher-name">{item.name}</span>
+                            {/* 列的是文档目录：工作区之间真正的差别在这里。 */}
+                            <span className="switcher-path">{shortenPath(item.docs)}</span>
+                          </span>
+                          {item.id === workspaceId ? (
+                            <Check className="switcher-check" size={13} />
+                          ) : (
+                            <span className="switcher-go">切换</span>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                  {workspaceList.length === 0 && (
+                    <p className="switcher-empty">还没有记录过任何工作区</p>
+                  )}
+                  <form
+                    className="switcher-add"
+                    onSubmit={event => {
+                      event.preventDefault();
+                      void (async () => {
+                        const response = await fetch('/api/workspaces', {
+                          method: 'POST',
+                          headers: {'content-type': 'application/json'},
+                          body: JSON.stringify({root: newWorkspace.trim()}),
+                        });
+                        const payload = (await response.json()) as {
+                          workspace?: {id: string};
+                          error?: {message: string};
+                        };
+
+                        if (!response.ok || !payload.workspace) {
+                          setStatus(`添加失败：${payload.error?.message ?? response.status}`);
+                          return;
+                        }
+
+                        setNewWorkspace('');
+                        setSwitcherOpen(false);
+                        await loadWorkspaces();
+                        navigate(`/w/${payload.workspace.id}/`);
+                      })();
+                    }}
+                  >
+                    <input
+                      aria-label="工作区目录"
+                      onChange={event => setNewWorkspace(event.target.value)}
+                      placeholder="项目根或文档目录…"
+                      value={newWorkspace}
+                    />
+                    <button aria-label="添加工作区" title="添加工作区" type="submit">
+                      <Plus size={14} />
+                    </button>
+                  </form>
+                </div>
+              </>
+            )}
+          </div>
           <input
             className="filter"
             placeholder="过滤…"
@@ -1131,58 +1266,6 @@ function Workspace() {
             onChange={event => setFilter(event.target.value)}
           />
         </div>
-        {switcherOpen && (
-          <div className="switcher">
-            {workspaceList.map(item => (
-              <button
-                className={`switcher-item${item.id === workspaceId ? ' current' : ''}`}
-                key={item.id}
-                onClick={() => {
-                  setSwitcherOpen(false);
-                  navigate(`/w/${item.id}/`);
-                }}
-                type="button"
-              >
-                <span className="switcher-name">{item.name}</span>
-                <span className="switcher-path">{item.root}</span>
-              </button>
-            ))}
-            <form
-              className="switcher-add"
-              onSubmit={event => {
-                event.preventDefault();
-                void (async () => {
-                  const response = await fetch('/api/workspaces', {
-                    method: 'POST',
-                    headers: {'content-type': 'application/json'},
-                    body: JSON.stringify({root: newWorkspace.trim()}),
-                  });
-                  const payload = (await response.json()) as {
-                    workspace?: {id: string};
-                    error?: {message: string};
-                  };
-
-                  if (!response.ok || !payload.workspace) {
-                    setStatus(`添加失败：${payload.error?.message ?? response.status}`);
-                    return;
-                  }
-
-                  setNewWorkspace('');
-                  setSwitcherOpen(false);
-                  await loadWorkspaces();
-                  navigate(`/w/${payload.workspace.id}/`);
-                })();
-              }}
-            >
-              <input
-                onChange={event => setNewWorkspace(event.target.value)}
-                placeholder="添加工作区：填目录路径"
-                value={newWorkspace}
-              />
-              <button type="submit">添加</button>
-            </form>
-          </div>
-        )}
         {git?.available && git.changes.length > 0 && (
           <button className="review-cue" onClick={() => navigate(`/w/${workspaceId}/changes`)} type="button">
             <GitCommitHorizontal size={12} />

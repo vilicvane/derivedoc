@@ -332,6 +332,16 @@ function Workspace() {
   const draft = selected ? drafts[selected] ?? doc?.body ?? '' : '';
   const dirty = doc !== undefined && draft !== doc.body;
 
+  /**
+   * 有没有未保存的改动。只有当前这篇能拿磁盘正文比对；已经切走的文档只剩草稿，
+   * 有草稿就算有改动（编辑器只在用户真的敲字时才写草稿）。
+   */
+  const hasDraft = useCallback(
+    (id: string) =>
+      drafts[id] !== undefined && (doc?.id === id ? drafts[id] !== doc.body : true),
+    [doc, drafts],
+  );
+
   // 选中一段就记下来：agent 用 `dd selection` 读到的就是它。
   const pickTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pickSet = useRef(false);
@@ -1083,9 +1093,8 @@ function Workspace() {
   /** 打开文档：有改动就先进 diff，没有就直接进编辑器。 */
   const selectDoc = (id: string) => {
     const target = docs.find(item => item.id === id);
-    const hasDraft = drafts[id] !== undefined;
     const hasGitChange = target ? changeByPath.has(target.relPath) : false;
-    openDoc(id, {diff: !hasDraft && hasGitChange});
+    openDoc(id, {diff: !hasDraft(id) && hasGitChange});
   };
 
   const onContentClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -1222,7 +1231,7 @@ function Workspace() {
           <span className="file">
             {fileName(node.doc.id)}
             <span className="marks">
-              {drafts[node.doc.id] !== undefined && <span className="dot" title="有未保存的草稿" />}
+              {hasDraft(node.doc.id) && <span className="dot" title="有未保存的草稿" />}
               {change?.added !== undefined ? (
                 <span className="delta" title={`${statusLabel(change)}：未提交`}>
                   <span className="add">+{change.added}</span>

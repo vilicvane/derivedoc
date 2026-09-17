@@ -219,6 +219,8 @@ export function MarkdownEditor({
   const theme = useTheme();
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<monaco.editor.IStandaloneCodeEditor>(undefined);
+  /** 外部灌入内容时置位，用来区分「用户敲的」和「我们设的」改动事件。 */
+  const applying = useRef(false);
   // 回调每次渲染都可能换新，用 ref 让编辑器始终调用最新那个。
   const change = useRef(onChange);
   const pick = useRef(onPick);
@@ -239,9 +241,13 @@ export function MarkdownEditor({
       model,
       theme: currentTheme(),
     });
-    const subscription = instance.onDidChangeModelContent(() =>
-      change.current(instance.getValue()),
-    );
+    const subscription = instance.onDidChangeModelContent(() => {
+      if (applying.current) {
+        return;
+      }
+
+      change.current(instance.getValue());
+    });
 
     editor.current = instance;
     watchSelection(instance, next => pick.current?.(next));
@@ -259,7 +265,9 @@ export function MarkdownEditor({
     const instance = editor.current;
 
     if (instance && instance.getValue() !== value) {
+      applying.current = true;
       instance.setValue(value);
+      applying.current = false;
     }
   }, [value]);
 

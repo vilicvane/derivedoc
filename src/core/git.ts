@@ -21,6 +21,8 @@ export interface GitStatus {
   changes: GitChange[];
   /** 待提交的 commit message（存在 .derivedoc/commit-message 里） */
   message?: string;
+  /** 存着的那句描述的是更早的一批改动，已经不能当默认值用 */
+  messageStale?: boolean;
   /** 工作区里不属于两层文档、但同样未提交的条目数（代码等） */
   otherChanges: number;
 }
@@ -102,14 +104,45 @@ export async function gitStatus(root: string, docs: string): Promise<GitStatus> 
   const otherChanges = parsePorcelain(overall.stdout, prefix).filter(
     change => !isDocPath(change.path),
   ).length;
+  const trimmed = message.trim();
+  const follows = trimmed ? await messageFollows(root, docs, changes) : false;
 
   return {
     available: true,
     branch: branch.code === 0 ? branch.stdout.trim() : undefined,
     changes,
-    message,
+    message: follows ? trimmed : '',
+    ...(trimmed && !follows && changes.length > 0 ? {messageStale: true} : {}),
     otherChanges,
   };
+}
+
+/**
+ * 存着的 commit message 还算不算数：它写下来之后这批改动没人再动过才算。
+ * 改动文件比它新，说明那句描述的是更早的一批——界面会按当前改动重新草拟一句。
+ */
+async function messageFollows(root: string, docs: string, changes: GitChange[]): Promise<boolean> {
+  if (changes.length === 0) {
+    return false;
+  }
+
+  const written = await fs.stat(path.join(root, MESSAGE_FILE)).catch(() => undefined);
+
+  if (!written) {
+    return false;
+  }
+
+  let newest = 0;
+
+  for (const change of changes) {
+    const info = await fs.stat(path.join(root, filePathOf(root, docs, change.path))).catch(() => undefined);
+
+    if (info && info.mtimeMs > newest) {
+      newest = info.mtimeMs;
+    }
+  }
+
+  return written.mtimeMs >= newest;
 }
 
 /** 路径是相对文档目录的，所以这里只比两层名字。 */

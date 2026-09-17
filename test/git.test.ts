@@ -95,6 +95,30 @@ test('改动后能拿到 diff，提交后工作区干净', async () => {
   }
 });
 
+test('存着的 commit message 跟不上改动时不再当默认值', async () => {
+  const dir = await createRepo();
+  const store = await DocStore.open(dir, {watch: false});
+
+  try {
+    await store.write('source/decisions', '# 决定\n');
+    await writeMessage(dir, '记录第一条决定');
+
+    const fresh = await gitStatus(dir, dir);
+    assert.equal(fresh.message, '记录第一条决定');
+    assert.equal(fresh.messageStale, undefined);
+
+    // 之后再动一笔：那句描述的是更早的改动，界面该按当前改动重拟。
+    await new Promise(resolve => setTimeout(resolve, 15));
+    await store.write('source/decisions', '# 决定\n\n又改了一笔。\n');
+
+    const stale = await gitStatus(dir, dir);
+    assert.equal(stale.message, '');
+    assert.equal(stale.messageStale, true);
+  } finally {
+    await store.close();
+  }
+});
+
 test('提交只带上两层文档，不动其它暂存内容', async () => {
   const dir = await createRepo();
   await fs.writeFile(path.join(dir, 'other.txt'), 'not a doc\n');

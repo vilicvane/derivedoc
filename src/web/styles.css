@@ -1554,12 +1554,24 @@ button.stage-button:disabled {
 }
 
 .git-commit {
-  align-items: stretch;
   background: var(--paper-raised);
   border-top: 1px solid var(--rule);
   display: flex;
+  flex-direction: column;
   gap: 0.75rem;
   padding: 1rem 1.4rem;
+}
+
+.commit-row {
+  align-items: stretch;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.commit-hint {
+  color: var(--ink-3);
+  font-size: 0.72rem;
+  margin: 0;
 }
 
 .git-commit textarea {

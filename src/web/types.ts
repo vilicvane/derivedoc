@@ -70,7 +70,10 @@ export interface GitStatus {
   reason?: string;
   branch?: string;
   changes: GitChange[];
+  /** `.derivedoc/commit-message` 里那句；跟不上这批改动时为空 */
   message?: string;
+  /** 存着的那句描述的是更早的一批改动 */
+  messageStale?: boolean;
   otherChanges: number;
 }
 

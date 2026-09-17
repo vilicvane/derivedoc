@@ -16,6 +16,8 @@ export interface GitReview {
   sides?: {original: string; modified: string};
   message: string;
   setMessage: (message: string) => void;
+  /** 存着的提交信息跟不上这批改动了（界面要说一句） */
+  messageStale: boolean;
   busy: boolean;
   changeByPath: Map<string, GitChange>;
   /** 这次提交会带上几篇：暂存过按暂存的算，否则算全部文档改动。 */
@@ -48,6 +50,7 @@ export function useGitReview(
   const [sides, setSides] = useState<{original: string; modified: string}>();
   const [base, setBase] = useState<'head' | 'index'>('head');
   const [message, setMessage] = useState('');
+  const [messageStale, setMessageStale] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const loadGit = useCallback(
@@ -63,6 +66,7 @@ export function useGitReview(
 
       if (!loadOptions.keepMessage) {
         setMessage(payload.message?.trim() || draftMessage(payload.changes));
+        setMessageStale(payload.messageStale === true);
       }
 
       return payload;
@@ -184,6 +188,7 @@ export function useGitReview(
     sides,
     message,
     setMessage,
+    messageStale,
     busy,
     changeByPath,
     commitCount,

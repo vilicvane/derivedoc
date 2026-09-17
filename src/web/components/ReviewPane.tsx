@@ -141,24 +141,31 @@ export function ReviewPane({git, onPick, onClose}: {git: GitReview; onPick: (pic
                   </div>
                 </div>
                 <div className="git-commit">
-                  <textarea
-                    placeholder="commit message（提交前可以改）"
-                    value={git.message}
-                    onChange={event => git.setMessage(event.target.value)}
-                  />
-                  <button
-                    className="primary"
-                    disabled={git.busy || git.commitCount === 0}
-                    onClick={() => void git.commit()}
-                    title={
-                      git.stagedCount > 0
-                        ? `只提交已暂存的 ${git.stagedCount} 篇`
-                        : `把 ${git.commitCount} 篇文档的改动一起提交`
-                    }
-                    type="button"
-                  >
-                    提交 {git.commitCount} 个
-                  </button>
+                  <div className="commit-row">
+                    <textarea
+                      placeholder="commit message（提交前可以改）"
+                      value={git.message}
+                      onChange={event => git.setMessage(event.target.value)}
+                    />
+                    <button
+                      className="primary"
+                      disabled={git.busy || git.commitCount === 0}
+                      onClick={() => void git.commit()}
+                      title={
+                        git.stagedCount > 0
+                          ? `只提交已暂存的 ${git.stagedCount} 篇`
+                          : `把 ${git.commitCount} 篇文档的改动一起提交`
+                      }
+                      type="button"
+                    >
+                      提交 {git.commitCount} 个
+                    </button>
+                  </div>
+                  {git.messageStale && (
+                    <p className="commit-hint">
+                      存着的提交信息描述的是更早的改动，这里按当前改动先草拟了一句
+                    </p>
+                  )}
                 </div>
               </>
             )}

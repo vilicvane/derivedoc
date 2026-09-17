@@ -27,6 +27,8 @@ import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/dif
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
 import {api, ApiError, messageOf} from './api.ts';
+import {useDocs} from './hooks/useDocs.ts';
+import {useGitReview} from './hooks/useGitReview.ts';
 import {useToasts} from './hooks/useToasts.ts';
 import {useWorkspaces} from './hooks/useWorkspaces.ts';
 import {MarkdownDiff, MarkdownEditor, type Pick} from './editors.tsx';
@@ -87,7 +89,6 @@ function DefaultWorkspace() {
 }
 
 function Workspace() {
-  const [docs, setDocs] = useState<DocMeta[]>([]);
   const [doc, setDoc] = useState<Doc>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [incoming, setIncoming] = useState<Incoming>();
@@ -100,15 +101,7 @@ function Workspace() {
   const [fileDiff, setFileDiff] = useState<{original: string; modified: string}>();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
-  const [hits, setHits] = useState<SearchHit[]>();
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [git, setGit] = useState<GitStatus>();
-  const [gitFile, setGitFile] = useState<string>();
-  const [gitDiffText, setGitDiffText] = useState('');
-  const [gitSides, setGitSides] = useState<{original: string; modified: string}>();
-  const [reviewBase, setReviewBase] = useState<'head' | 'index'>('head');
-  const [gitMessage, setGitMessage] = useState('');
-  const [gitBusy, setGitBusy] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState('');
   const [newDocs, setNewDocs] = useState('');
@@ -161,6 +154,45 @@ function Workspace() {
 
   const draft = selected ? drafts[selected] ?? doc?.body ?? '' : '';
   const dirty = doc !== undefined && draft !== doc.body;
+
+  const {toasts, notify} = useToasts();
+  const setStatus = notify;
+
+  const {docs, tree, flatDocs, hits, loadDocs} = useDocs(workspaceId, filter);
+  const {workspace, workspaces, loadWorkspaces} = useWorkspaces(workspaceId);
+
+  const {
+    status: git,
+    file: gitFile,
+    setFile: setGitFile,
+    base: reviewBase,
+    setBase: setReviewBase,
+    diffText: gitDiffText,
+    sides: gitSides,
+    message: gitMessage,
+    setMessage: setGitMessage,
+    busy: gitBusy,
+    changeByPath,
+    commitCount,
+    stagedCount,
+    loadGit,
+    loadDiff: loadGitDiff,
+    stage,
+    commit,
+  } = useGitReview(workspaceId, {
+    review: gitOpen,
+    notify,
+    onCommitted: async () => {
+      await loadDocs();
+
+      // 提交完没什么可审的了，回到刚才那篇文档。
+      if (selected) {
+        openDoc(selected);
+      } else {
+        navigate(`/w/${workspaceId}/`);
+      }
+    },
+  });
 
   /**
    * 有没有未保存的改动。只有当前这篇能拿磁盘正文比对；已经切走的文档只剩草稿，
@@ -218,16 +250,7 @@ function Workspace() {
   const stateRef = useRef({doc, draft, selected});
   const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
   const focusEditorRef = useRef(false);
-  const autoPickedRef = useRef(false);
   stateRef.current = {doc, draft, selected};
-
-  const {toasts, notify} = useToasts();
-  const setStatus = notify;
-
-  const changeByPath = useMemo(
-    () => new Map((git?.changes ?? []).map(change => [change.path, change])),
-    [git],
-  );
 
   /** 当前这篇文档的 git 状态：用来决定「暂存 / 取消暂存」显示哪个。 */
   const docChange = doc ? changeByPath.get(doc.relPath) : undefined;
@@ -240,41 +263,8 @@ function Workspace() {
   const diffCaption = againstStaged ? '与暂存区对比' : '与 HEAD 对比';
   const diffTitle = againstStaged ? '看与暂存区的对比' : '看与 HEAD 的对比';
 
-  /** 已暂存的文件数：提交时优先只带这些，没暂存过就整层提交。 */
-  const stagedCount = (git?.changes ?? []).filter(
-    change => change.index !== ' ' && change.index !== '?',
-  ).length;
-
-  /** 这次提交会带上几篇：暂存过就按暂存的算，否则算上全部文档改动。 */
-  const commitCount = stagedCount > 0 ? stagedCount : (git?.changes.length ?? 0);
-
   /** 路由里的 id 不在文档列表里：多半是失效链接。 */
   const missingDoc = Boolean(selected) && docs.length > 0 && !docs.some(item => item.id === selected);
-
-  const tree = useMemo(() => buildTree(docs), [docs]);
-
-  const flatDocs = useMemo(() => {
-    const list: DocMeta[] = [];
-    const walk = (nodes: TreeNode[]): void => {
-      for (const node of nodes) {
-        if (node.doc) {
-          list.push(node.doc);
-        } else {
-          walk(node.children);
-        }
-      }
-    };
-    walk(tree);
-    return list;
-  }, [tree]);
-
-  const loadDocs = useCallback(async () => {
-    const list = await api.docs(workspaceId);
-    setDocs(list);
-    return list;
-  }, [workspaceId]);
-
-  const {workspace, workspaces, loadWorkspaces} = useWorkspaces(workspaceId);
 
   const loadDoc = useCallback(async (id: string) => {
     let payload: Doc;
@@ -303,44 +293,6 @@ function Workspace() {
 
   const loadBacklinks = useCallback(async (id: string) => {
     setBacklinks(await api.backlinks(workspaceId, id).catch(() => []));
-  }, [workspaceId]);
-
-  const loadGit = useCallback(async (options: {keepMessage?: boolean} = {}) => {
-    const payload = await api.gitStatus(workspaceId).catch(() => undefined);
-
-    if (!payload) {
-      setGit(undefined);
-      return undefined;
-    }
-
-    setGit(payload);
-
-    if (!options.keepMessage) {
-      setGitMessage(payload.message?.trim() || draftMessage(payload.changes));
-    }
-
-    return payload;
-  }, [workspaceId]);
-
-  const loadGitDiff = useCallback(async (file?: string, base: 'head' | 'index' = 'head') => {
-    let text: string;
-
-    try {
-      text = await api.gitDiff(workspaceId, file, base);
-    } catch {
-      setGitDiffText('');
-      setGitSides(undefined);
-      return;
-    }
-
-    setGitDiffText(text);
-
-    if (!file) {
-      setGitSides(undefined);
-      return;
-    }
-
-    setGitSides(await api.gitShow(workspaceId, file, base).catch(() => undefined));
   }, [workspaceId]);
 
   useEffect(() => {
@@ -488,30 +440,220 @@ function Workspace() {
   }, [loadDocs]);
 
   useEffect(() => {
-    if (gitOpen) {
-      void loadGitDiff(gitFile, reviewBase);
-    }
-  }, [gitOpen, gitFile, loadGitDiff, reviewBase]);
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
 
-  // 审阅页总是盯着一篇文档：没选或选中的文件已经不在改动里，就落到第一篇。
+    socket.onmessage = async event => {
+      const change = JSON.parse(event.data as string) as
+        | Change
+        | {type: 'ready'}
+        | {type: 'reload'};
+
+      if (change.type === 'ready') {
+        return;
+      }
+
+      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
+        return;
+      }
+
+      if (change.type === 'reload') {
+        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
+        location.reload();
+        return;
+      }
+
+      void loadDocs();
+      void loadGit({keepMessage: true});
+      const current = stateRef.current;
+
+      if (change.id !== current.doc?.id || change.revision === current.doc.revision) {
+        return;
+      }
+
+      let fresh: Doc;
+
+      try {
+        fresh = await api.doc(workspaceId, change.id);
+      } catch {
+        if (change.type === 'deleted') {
+          // 正在看的文档被删掉了：不要继续显示旧内容。
+          setDoc(undefined);
+          setStatus(`${change.id} 已被删除`);
+        } else {
+          setStatus('文档读取失败');
+        }
+
+        return;
+      }
+
+      const pending = pendingWriteRef.current;
+
+      if (pending && pending.id === fresh.id && pending.body === fresh.body) {
+        // 自己刚写的回声，不当作外部改动。
+        pendingWriteRef.current = undefined;
+        return;
+      }
+
+      if (current.draft === current.doc.body) {
+        setDoc(fresh);
+        setIncoming(undefined);
+        setStatus('文档已被外部修改，已重新载入');
+      } else {
+        setIncoming({id: fresh.id, revision: fresh.revision, body: fresh.body});
+        setStatus('磁盘上有新版本，你的草稿还没保存');
+      }
+    };
+
+    return () => socket.close();
+  }, [loadDocs]);
+
   useEffect(() => {
-    if (!gitOpen) {
-      autoPickedRef.current = false;
-      return;
-    }
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
 
-    const list = git?.changes ?? [];
+    socket.onmessage = async event => {
+      const change = JSON.parse(event.data as string) as
+        | Change
+        | {type: 'ready'}
+        | {type: 'reload'};
 
-    if (list.length === 0) {
-      setGitFile(undefined);
-      return;
-    }
+      if (change.type === 'ready') {
+        return;
+      }
 
-    if (!autoPickedRef.current || !gitFile || !list.some(change => change.path === gitFile)) {
-      autoPickedRef.current = true;
-      setGitFile(list[0]!.path);
+      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
+        return;
+      }
+
+      if (change.type === 'reload') {
+        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
+        location.reload();
+        return;
+      }
+
+      void loadDocs();
+      void loadGit({keepMessage: true});
+      const current = stateRef.current;
+
+      if (change.id !== current.doc?.id || change.revision === current.doc.revision) {
+        return;
+      }
+
+      let fresh: Doc;
+
+      try {
+        fresh = await api.doc(workspaceId, change.id);
+      } catch {
+        if (change.type === 'deleted') {
+          // 正在看的文档被删掉了：不要继续显示旧内容。
+          setDoc(undefined);
+          setStatus(`${change.id} 已被删除`);
+        } else {
+          setStatus('文档读取失败');
+        }
+
+        return;
+      }
+
+      const pending = pendingWriteRef.current;
+
+      if (pending && pending.id === fresh.id && pending.body === fresh.body) {
+        // 自己刚写的回声，不当作外部改动。
+        pendingWriteRef.current = undefined;
+        return;
+      }
+
+      if (current.draft === current.doc.body) {
+        setDoc(fresh);
+        setIncoming(undefined);
+        setStatus('文档已被外部修改，已重新载入');
+      } else {
+        setIncoming({id: fresh.id, revision: fresh.revision, body: fresh.body});
+        setStatus('磁盘上有新版本，你的草稿还没保存');
+      }
+    };
+
+    return () => socket.close();
+  }, [loadDocs]);
+
+  useEffect(() => {
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
+
+    socket.onmessage = async event => {
+      const change = JSON.parse(event.data as string) as
+        | Change
+        | {type: 'ready'}
+        | {type: 'reload'};
+
+      if (change.type === 'ready') {
+        return;
+      }
+
+      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
+        return;
+      }
+
+      if (change.type === 'reload') {
+        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
+        location.reload();
+        return;
+      }
+
+      void loadDocs();
+      void loadGit({keepMessage: true});
+      const current = stateRef.current;
+
+      if (change.id !== current.doc?.id || change.revision === current.doc.revision) {
+        return;
+      }
+
+      let fresh: Doc;
+
+      try {
+        fresh = await api.doc(workspaceId, change.id);
+      } catch {
+        if (change.type === 'deleted') {
+          // 正在看的文档被删掉了：不要继续显示旧内容。
+          setDoc(undefined);
+          setStatus(`${change.id} 已被删除`);
+        } else {
+          setStatus('文档读取失败');
+        }
+
+        return;
+      }
+
+      const pending = pendingWriteRef.current;
+
+      if (pending && pending.id === fresh.id && pending.body === fresh.body) {
+        // 自己刚写的回声，不当作外部改动。
+        pendingWriteRef.current = undefined;
+        return;
+      }
+
+      if (current.draft === current.doc.body) {
+        setDoc(fresh);
+        setIncoming(undefined);
+        setStatus('文档已被外部修改，已重新载入');
+      } else {
+        setIncoming({id: fresh.id, revision: fresh.revision, body: fresh.body});
+        setStatus('磁盘上有新版本，你的草稿还没保存');
+      }
+    };
+
+    return () => socket.close();
+  }, [loadDocs]);
+
+  /** 文档页的暂存：和审阅页共用 stage，再补一次文档自己的 diff。 */
+  const stageDoc = async (path: string, unstage = false) => {
+    await stage(path, unstage);
+
+    if (diffMode === 'file') {
+      await loadFileDiff();
     }
-  }, [gitFile, gitOpen, git]);
+  };
 
   const save = useCallback(async () => {
     const current = stateRef.current;
@@ -541,25 +683,6 @@ function Workspace() {
     await loadBacklinks(current.doc.id);
     await loadGit({keepMessage: true});
   }, [loadDoc, loadDocs, loadBacklinks]);
-
-  useEffect(() => {
-    const query = filter.trim();
-
-    if (!query) {
-      setHits(undefined);
-      return;
-    }
-
-    const timer = setTimeout(async () => {
-      const found = await api.search(workspaceId, query).catch(() => undefined);
-
-      if (found) {
-        setHits(found);
-      }
-    }, 150);
-
-    return () => clearTimeout(timer);
-  }, [filter, workspaceId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -713,61 +836,6 @@ function Workspace() {
 
     if (next) {
       openDoc(next.id, {diff: false});
-    } else {
-      navigate(`/w/${workspaceId}/`);
-    }
-  };
-
-  const stage = async (path?: string, unstage = false) => {
-    setGitBusy(true);
-
-    try {
-      setGit(await api.stage(workspaceId, path, unstage));
-    } catch {
-      setGitBusy(false);
-      setStatus(unstage ? '取消暂存失败' : '暂存失败');
-      return;
-    }
-
-    setGitBusy(false);
-    await loadGitDiff(gitFile);
-
-    // 文档页的 diff 以暂存区为基准，暂存之后它得跟着变。
-    if (diffMode === 'file') {
-      await loadFileDiff();
-    }
-  };
-
-  const commit = async () => {
-    setGitBusy(true);
-
-    let payload: {ok: boolean; sha?: string; error?: string};
-
-    try {
-      payload = await api.commit(workspaceId, gitMessage);
-    } catch (error) {
-      setGitBusy(false);
-      setStatus(`提交失败：${messageOf(error)}`);
-      return;
-    }
-
-    setGitBusy(false);
-
-    if (!payload.ok) {
-      setStatus(`提交失败：${payload.error ?? '未知原因'}`);
-      return;
-    }
-
-    setStatus(`已提交 ${payload.sha}`);
-    setGitMessage('');
-    setGitFile(undefined);
-    await loadGit();
-    await loadGitDiff(undefined);
-    await loadDocs();
-
-    // 提交完没什么可审的了，回到刚才那篇文档。
-    if (selected) {
-      openDoc(selected);
     } else {
       navigate(`/w/${workspaceId}/`);
     }
@@ -1338,7 +1406,7 @@ function Workspace() {
                   <button
                     className="stage-button"
                     disabled={gitBusy}
-                    onClick={() => void stage(doc.relPath)}
+                    onClick={() => void stageDoc(doc.relPath)}
                     title="把这篇的改动放进暂存区，之后在审阅页提交"
                     type="button"
                   >
@@ -1349,7 +1417,7 @@ function Workspace() {
                 {docChange && isStaged(docChange) && (
                   <button
                     disabled={gitBusy}
-                    onClick={() => void stage(doc.relPath, true)}
+                    onClick={() => void stageDoc(doc.relPath, true)}
                     title="把这篇从暂存区拿下来，改动留在工作区"
                     type="button"
                   >

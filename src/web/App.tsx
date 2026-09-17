@@ -27,6 +27,7 @@ import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/dif
 import {DEFAULT_DOCS_DIR} from '../core/defaults.ts';
 import {resolveDocId} from '../core/links.ts';
 import {api, ApiError, messageOf} from './api.ts';
+import {useDocSession} from './hooks/useDocSession.ts';
 import {useDocs} from './hooks/useDocs.ts';
 import {useGitReview} from './hooks/useGitReview.ts';
 import {useToasts} from './hooks/useToasts.ts';
@@ -89,24 +90,16 @@ function DefaultWorkspace() {
 }
 
 function Workspace() {
-  const [doc, setDoc] = useState<Doc>();
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [incoming, setIncoming] = useState<Incoming>();
-  const [showIncoming, setShowIncoming] = useState(false);
-  const [backlinks, setBacklinks] = useState<DocMeta[]>([]);
   const [filter, setFilter] = useState('');
   const [creating, setCreating] = useState<DocKind>();
   const [creatingFolder, setCreatingFolder] = useState<string>();
   const [newId, setNewId] = useState('');
   const [fileDiff, setFileDiff] = useState<{original: string; modified: string}>();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState('');
   const [newDocs, setNewDocs] = useState('');
-  const [provenance, setProvenance] = useState<ConversationRecord[]>([]);
-  const [showProvenance, setShowProvenance] = useState(false);
 
   useEffect(() => {
     if (!switcherOpen) {
@@ -136,25 +129,6 @@ function Workspace() {
       `/w/${workspaceId}/d/${id}${options.diff ? '?diff=1' : ''}`,
     [workspaceId],
   );
-  const diffMode: 'file' | 'incoming' | undefined =
-    incoming && showIncoming
-      ? 'incoming'
-      : searchParams.get('diff') === '1'
-        ? 'file'
-        : undefined;
-
-  const openDoc = useCallback(
-    (id: string, options: {diff?: boolean} = {}) => {
-      setIncoming(undefined);
-      setShowIncoming(false);
-      navigate(docUrl(id, options));
-    },
-    [navigate, docUrl],
-  );
-
-  const draft = selected ? drafts[selected] ?? doc?.body ?? '' : '';
-  const dirty = doc !== undefined && draft !== doc.body;
-
   const {toasts, notify} = useToasts();
   const setStatus = notify;
 
@@ -184,24 +158,58 @@ function Workspace() {
     notify,
     onCommitted: async () => {
       await loadDocs();
-
-      // 提交完没什么可审的了，回到刚才那篇文档。
-      if (selected) {
-        openDoc(selected);
-      } else {
-        navigate(`/w/${workspaceId}/`);
-      }
     },
   });
 
-  /**
-   * 有没有未保存的改动。只有当前这篇能拿磁盘正文比对；已经切走的文档只剩草稿，
-   * 有草稿就算有改动（编辑器只在用户真的敲字时才写草稿）。
-   */
-  const hasDraft = useCallback(
-    (id: string) =>
-      drafts[id] !== undefined && (doc?.id === id ? drafts[id] !== doc.body : true),
-    [doc, drafts],
+  const {
+    doc,
+    draft,
+    dirty,
+    drafts,
+    setDrafts,
+    hasDraft,
+    incoming,
+    showIncoming,
+    setShowIncoming,
+    setIncoming,
+    backlinks,
+    provenance,
+    showProvenance,
+    setShowProvenance,
+    busy,
+    loadDoc,
+    applyExternal,
+    acceptIncoming,
+    save,
+    createDoc: createDocInStore,
+    removeDoc,
+  } = useDocSession(workspaceId, selected, {
+    notify,
+    onSaved: async () => {
+      await loadDocs();
+      await loadGit({keepMessage: true});
+    },
+    onRemoved: async () => {
+      const list = await loadDocs();
+      const next = list.find(item => item.kind === 'source') ?? list[0];
+      navigate(next ? docUrl(next.id, {diff: false}) : `/w/${workspaceId}/`);
+    },
+  });
+
+  const diffMode: 'file' | 'incoming' | undefined =
+    incoming && showIncoming
+      ? 'incoming'
+      : searchParams.get('diff') === '1'
+        ? 'file'
+        : undefined;
+
+  const openDoc = useCallback(
+    (id: string, options: {diff?: boolean} = {}) => {
+      setIncoming(undefined);
+      setShowIncoming(false);
+      navigate(docUrl(id, options));
+    },
+    [navigate, docUrl, setIncoming, setShowIncoming],
   );
 
   // 选中一段就记下来：agent 用 `dd selection` 读到的就是它。
@@ -266,35 +274,6 @@ function Workspace() {
   /** 路由里的 id 不在文档列表里：多半是失效链接。 */
   const missingDoc = Boolean(selected) && docs.length > 0 && !docs.some(item => item.id === selected);
 
-  const loadDoc = useCallback(async (id: string) => {
-    let payload: Doc;
-
-    try {
-      payload = await api.doc(workspaceId, id);
-    } catch (error) {
-      setStatus(
-        error instanceof ApiError && error.status === 404
-          ? `${id} 不存在或已被删除`
-          : `读取失败：${messageOf(error)}`,
-      );
-      return undefined;
-    }
-
-    setDoc(payload);
-    setIncoming(undefined);
-    setShowIncoming(false);
-    setDrafts(current => {
-      const next = {...current};
-      delete next[id];
-      return next;
-    });
-    return payload;
-  }, [workspaceId]);
-
-  const loadBacklinks = useCallback(async (id: string) => {
-    setBacklinks(await api.backlinks(workspaceId, id).catch(() => []));
-  }, [workspaceId]);
-
   useEffect(() => {
     void loadDocs().then(list => {
       // 路由带工作区前缀（/w/<id>/changes），这里用结尾判断，否则深链接会被踢回文档。
@@ -311,39 +290,38 @@ function Workspace() {
     void loadGit();
   }, [loadDocs, loadGit, pathname, selected, navigate]);
 
+  // 服务端推来的变化：文档改动重载对应的数据，dev 模式重构建完成则整页刷新。
   useEffect(() => {
-    if (!selected) {
-      return;
-    }
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
 
-    setStatus('');
-    setIncoming(undefined);
-    void loadDoc(selected);
-    void loadBacklinks(selected);
-  }, [selected, loadDoc, loadBacklinks]);
+    socket.onmessage = async event => {
+      const change = JSON.parse(event.data as string) as
+        | Change
+        | {type: 'ready'}
+        | {type: 'reload'};
 
-  // 这篇文档是被哪几段对话改出来的。
-  useEffect(() => {
-    if (!selected) {
-      setProvenance([]);
-      return;
-    }
-
-    let cancelled = false;
-    setShowProvenance(false);
-
-    void (async () => {
-      const payload = await api.conversations(workspaceId, selected).catch(() => undefined);
-
-      if (!cancelled) {
-        setProvenance(payload ?? []);
+      if (change.type === 'ready') {
+        return;
       }
-    })();
 
-    return () => {
-      cancelled = true;
+      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
+        return;
+      }
+
+      if (change.type === 'reload') {
+        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
+        location.reload();
+        return;
+      }
+
+      void loadDocs();
+      void loadGit({keepMessage: true});
+      await applyExternal(change);
     };
-  }, [selected, workspaceId]);
+
+    return () => socket.close();
+  }, [applyExternal, loadDocs, loadGit, workspaceId]);
 
   /** 单个文档的 diff：以暂存区为基准，对比当前编辑器内容。 */
   const loadFileDiff = useCallback(async () => {
@@ -370,281 +348,9 @@ function Workspace() {
     }
   }, [diffMode, loadFileDiff]);
 
-  useEffect(() => {
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
 
-    socket.onmessage = async event => {
-      const change = JSON.parse(event.data as string) as
-        | Change
-        | {type: 'ready'}
-        | {type: 'reload'};
 
-      if (change.type === 'ready') {
-        return;
-      }
 
-      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
-        return;
-      }
-
-      if (change.type === 'reload') {
-        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
-        location.reload();
-        return;
-      }
-
-      void loadDocs();
-      void loadGit({keepMessage: true});
-      const current = stateRef.current;
-
-      if (change.id !== current.doc?.id || change.revision === current.doc.revision) {
-        return;
-      }
-
-      let fresh: Doc;
-
-      try {
-        fresh = await api.doc(workspaceId, change.id);
-      } catch {
-        if (change.type === 'deleted') {
-          // 正在看的文档被删掉了：不要继续显示旧内容。
-          setDoc(undefined);
-          setStatus(`${change.id} 已被删除`);
-        } else {
-          setStatus('文档读取失败');
-        }
-
-        return;
-      }
-
-      const pending = pendingWriteRef.current;
-
-      if (pending && pending.id === fresh.id && pending.body === fresh.body) {
-        // 自己刚写的回声，不当作外部改动。
-        pendingWriteRef.current = undefined;
-        return;
-      }
-
-      if (current.draft === current.doc.body) {
-        setDoc(fresh);
-        setIncoming(undefined);
-        setStatus('文档已被外部修改，已重新载入');
-      } else {
-        setIncoming({id: fresh.id, revision: fresh.revision, body: fresh.body});
-        setStatus('磁盘上有新版本，你的草稿还没保存');
-      }
-    };
-
-    return () => socket.close();
-  }, [loadDocs]);
-
-  useEffect(() => {
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
-
-    socket.onmessage = async event => {
-      const change = JSON.parse(event.data as string) as
-        | Change
-        | {type: 'ready'}
-        | {type: 'reload'};
-
-      if (change.type === 'ready') {
-        return;
-      }
-
-      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
-        return;
-      }
-
-      if (change.type === 'reload') {
-        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
-        location.reload();
-        return;
-      }
-
-      void loadDocs();
-      void loadGit({keepMessage: true});
-      const current = stateRef.current;
-
-      if (change.id !== current.doc?.id || change.revision === current.doc.revision) {
-        return;
-      }
-
-      let fresh: Doc;
-
-      try {
-        fresh = await api.doc(workspaceId, change.id);
-      } catch {
-        if (change.type === 'deleted') {
-          // 正在看的文档被删掉了：不要继续显示旧内容。
-          setDoc(undefined);
-          setStatus(`${change.id} 已被删除`);
-        } else {
-          setStatus('文档读取失败');
-        }
-
-        return;
-      }
-
-      const pending = pendingWriteRef.current;
-
-      if (pending && pending.id === fresh.id && pending.body === fresh.body) {
-        // 自己刚写的回声，不当作外部改动。
-        pendingWriteRef.current = undefined;
-        return;
-      }
-
-      if (current.draft === current.doc.body) {
-        setDoc(fresh);
-        setIncoming(undefined);
-        setStatus('文档已被外部修改，已重新载入');
-      } else {
-        setIncoming({id: fresh.id, revision: fresh.revision, body: fresh.body});
-        setStatus('磁盘上有新版本，你的草稿还没保存');
-      }
-    };
-
-    return () => socket.close();
-  }, [loadDocs]);
-
-  useEffect(() => {
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
-
-    socket.onmessage = async event => {
-      const change = JSON.parse(event.data as string) as
-        | Change
-        | {type: 'ready'}
-        | {type: 'reload'};
-
-      if (change.type === 'ready') {
-        return;
-      }
-
-      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
-        return;
-      }
-
-      if (change.type === 'reload') {
-        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
-        location.reload();
-        return;
-      }
-
-      void loadDocs();
-      void loadGit({keepMessage: true});
-      const current = stateRef.current;
-
-      if (change.id !== current.doc?.id || change.revision === current.doc.revision) {
-        return;
-      }
-
-      let fresh: Doc;
-
-      try {
-        fresh = await api.doc(workspaceId, change.id);
-      } catch {
-        if (change.type === 'deleted') {
-          // 正在看的文档被删掉了：不要继续显示旧内容。
-          setDoc(undefined);
-          setStatus(`${change.id} 已被删除`);
-        } else {
-          setStatus('文档读取失败');
-        }
-
-        return;
-      }
-
-      const pending = pendingWriteRef.current;
-
-      if (pending && pending.id === fresh.id && pending.body === fresh.body) {
-        // 自己刚写的回声，不当作外部改动。
-        pendingWriteRef.current = undefined;
-        return;
-      }
-
-      if (current.draft === current.doc.body) {
-        setDoc(fresh);
-        setIncoming(undefined);
-        setStatus('文档已被外部修改，已重新载入');
-      } else {
-        setIncoming({id: fresh.id, revision: fresh.revision, body: fresh.body});
-        setStatus('磁盘上有新版本，你的草稿还没保存');
-      }
-    };
-
-    return () => socket.close();
-  }, [loadDocs]);
-
-  useEffect(() => {
-    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const socket = new WebSocket(`${protocol}://${location.host}/ws`);
-
-    socket.onmessage = async event => {
-      const change = JSON.parse(event.data as string) as
-        | Change
-        | {type: 'ready'}
-        | {type: 'reload'};
-
-      if (change.type === 'ready') {
-        return;
-      }
-
-      if ('ws' in change && change.ws && workspaceId && change.ws !== workspaceId) {
-        return;
-      }
-
-      if (change.type === 'reload') {
-        // dev 模式下前端重新构建完成，直接刷新，省掉手动刷新。
-        location.reload();
-        return;
-      }
-
-      void loadDocs();
-      void loadGit({keepMessage: true});
-      const current = stateRef.current;
-
-      if (change.id !== current.doc?.id || change.revision === current.doc.revision) {
-        return;
-      }
-
-      let fresh: Doc;
-
-      try {
-        fresh = await api.doc(workspaceId, change.id);
-      } catch {
-        if (change.type === 'deleted') {
-          // 正在看的文档被删掉了：不要继续显示旧内容。
-          setDoc(undefined);
-          setStatus(`${change.id} 已被删除`);
-        } else {
-          setStatus('文档读取失败');
-        }
-
-        return;
-      }
-
-      const pending = pendingWriteRef.current;
-
-      if (pending && pending.id === fresh.id && pending.body === fresh.body) {
-        // 自己刚写的回声，不当作外部改动。
-        pendingWriteRef.current = undefined;
-        return;
-      }
-
-      if (current.draft === current.doc.body) {
-        setDoc(fresh);
-        setIncoming(undefined);
-        setStatus('文档已被外部修改，已重新载入');
-      } else {
-        setIncoming({id: fresh.id, revision: fresh.revision, body: fresh.body});
-        setStatus('磁盘上有新版本，你的草稿还没保存');
-      }
-    };
-
-    return () => socket.close();
-  }, [loadDocs]);
 
   /** 文档页的暂存：和审阅页共用 stage，再补一次文档自己的 diff。 */
   const stageDoc = async (path: string, unstage = false) => {
@@ -654,35 +360,6 @@ function Workspace() {
       await loadFileDiff();
     }
   };
-
-  const save = useCallback(async () => {
-    const current = stateRef.current;
-
-    if (!current.doc || current.draft === current.doc.body) {
-      return;
-    }
-
-    setBusy(true);
-    setStatus('保存中…', 'save');
-    pendingWriteRef.current = {id: current.doc.id, body: current.draft};
-
-    try {
-      await api.writeDoc(workspaceId, current.doc.id, current.draft, current.doc.revision);
-    } catch (error) {
-      pendingWriteRef.current = undefined;
-      setBusy(false);
-      setStatus(`保存失败：${messageOf(error)}`, 'save');
-      await loadDoc(current.doc.id);
-      return;
-    }
-
-    setBusy(false);
-    setStatus('已保存', 'save');
-    await loadDoc(current.doc.id);
-    await loadDocs();
-    await loadBacklinks(current.doc.id);
-    await loadGit({keepMessage: true});
-  }, [loadDoc, loadDocs, loadBacklinks]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -767,35 +444,16 @@ function Workspace() {
     setNewId('');
   };
 
+  /** 侧栏的新建入口：落盘后展开它所在的目录，聚焦编辑器。 */
   const createDoc = async (kind: DocKind) => {
-    const base = creatingFolder ?? kind;
-    const typed = newId.trim().replace(/\.md$/i, '');
-    // 输入按入口算相对路径：在 source 下写「ui/button」就是 source/ui/button；
-    // 写成完整 id（source/… 或 derived/…）也可以，不会被再拼一层。
-    const id = /^(source|derived)\//.test(typed) ? typed : `${base}/${typed}`;
+    const folder = creatingFolder ?? kind;
+    const id = await createDocInStore(folder, newId);
 
-    if (!typed) {
-      setStatus('先填一个 id');
+    if (!id) {
       return;
     }
 
-    setBusy(true);
-
-    try {
-      await api.createDoc(workspaceId, id, `# ${id.split('/').pop()}\n\n`);
-    } catch (error) {
-      setBusy(false);
-      setStatus(
-        error instanceof ApiError && error.status === 400 && /已存在/.test(messageOf(error))
-          ? `已存在同名文档：${id}`
-          : `创建失败：${messageOf(error)}`,
-      );
-      return;
-    }
-
-    setBusy(false);
     cancelCreate();
-    await loadDocs();
     // 新文档先展开它所在的目录，再进编辑器（而不是 diff）。
     setCollapsed(current => {
       const next = new Set(current);
@@ -810,35 +468,6 @@ function Workspace() {
     });
     focusEditorRef.current = true;
     openDoc(id, {diff: false});
-  };
-
-  const removeDoc = async () => {
-    if (!doc) {
-      return;
-    }
-
-    setConfirmingDelete(false);
-    setBusy(true);
-
-    try {
-      await api.removeDoc(workspaceId, doc.id);
-    } catch (error) {
-      setBusy(false);
-      setStatus(`删除失败：${messageOf(error)}`);
-      return;
-    }
-
-    setBusy(false);
-    setStatus(`${doc.id} 已删除`);
-    setDoc(undefined);
-    const list = await loadDocs();
-    const next = list.find(item => item.kind === 'source') ?? list[0];
-
-    if (next) {
-      openDoc(next.id, {diff: false});
-    } else {
-      navigate(`/w/${workspaceId}/`);
-    }
   };
 
   const titleOf = useMemo(() => {
@@ -1457,17 +1086,7 @@ function Workspace() {
                   {showIncoming ? '回到草稿' : '看差异'}
                 </button>
                 <button
-                  onClick={() => {
-                    setDrafts(current => {
-                      const next = {...current};
-                      delete next[incoming.id];
-                      return next;
-                    });
-                    setDoc({...doc, body: incoming.body, revision: incoming.revision});
-                    setIncoming(undefined);
-                    setShowIncoming(false);
-                    setStatus('已载入磁盘版本，草稿丢弃');
-                  }}
+                  onClick={acceptIncoming}
                   type="button"
                 >
                   用磁盘版本

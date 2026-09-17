@@ -8,6 +8,10 @@ export interface GitChange {
   index: string;
   /** 工作区状态 */
   worktree: string;
+  /** 相对 HEAD 的新增行数（未跟踪文件按整篇算） */
+  added?: number;
+  /** 相对 HEAD 的删除行数 */
+  removed?: number;
 }
 
 export interface GitStatus {
@@ -64,12 +68,55 @@ export async function gitStatus(root: string): Promise<GitStatus> {
     repoPrefix(root),
   ]);
 
+  const changes = parsePorcelain(status.stdout, prefix);
+  await attachLineStats(root, changes, prefix);
+
   return {
     available: true,
     branch: branch.code === 0 ? branch.stdout.trim() : undefined,
-    changes: parsePorcelain(status.stdout, prefix),
+    changes,
     message,
   };
+}
+
+/** 给每个变更文件补上 +/− 行数，方便批量审阅时先扫一眼大小。 */
+async function attachLineStats(
+  root: string,
+  changes: GitChange[],
+  prefix: string,
+): Promise<void> {
+  const numstat = await run(root, ['diff', '--numstat', 'HEAD', '--', ...SCOPES]);
+
+  for (const line of numstat.stdout.split('\n')) {
+    const [added, removed, ...rest] = line.split('\t');
+    const raw = rest.join('\t').trim();
+
+    if (!raw) {
+      continue;
+    }
+
+    const relPath = (prefix && raw.startsWith(prefix) ? raw.slice(prefix.length) : raw).replace(
+      /\/$/,
+      '',
+    );
+    const change = changes.find(item => item.path === relPath);
+
+    if (change) {
+      change.added = Number(added);
+      change.removed = Number(removed);
+    }
+  }
+
+  // 未跟踪的新文件不在 diff 里，直接数行数。
+  for (const change of changes) {
+    if (change.added !== undefined || change.index !== '?') {
+      continue;
+    }
+
+    const body = await fs.readFile(path.join(root, change.path), 'utf8').catch(() => '');
+    change.added = body ? body.split('\n').length : 0;
+    change.removed = 0;
+  }
 }
 
 export async function gitDiff(root: string, file?: string): Promise<string> {

@@ -79,6 +79,8 @@ interface GitChange {
   path: string;
   index: string;
   worktree: string;
+  added?: number;
+  removed?: number;
 }
 
 interface GitStatus {
@@ -221,6 +223,7 @@ function Workspace() {
   const stateRef = useRef({doc, draft, selected});
   const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
   const focusEditorRef = useRef(false);
+  const autoPickedRef = useRef(false);
   stateRef.current = {doc, draft, selected};
 
   const notify = useCallback((text: string) => {
@@ -277,7 +280,9 @@ function Workspace() {
     const response = await fetch(`/api/doc?id=${encodeURIComponent(id)}`);
 
     if (!response.ok) {
-      setStatus(`读取失败：${response.status}`);
+      setStatus(
+        response.status === 404 ? `${id} 不存在或已被删除` : `读取失败：${response.status}`,
+      );
       return undefined;
     }
 
@@ -429,7 +434,14 @@ function Workspace() {
       const response = await fetch(`/api/doc?id=${encodeURIComponent(change.id)}`);
 
       if (!response.ok) {
-        setStatus('文档被删除或读取失败');
+        if (change.type === 'deleted') {
+          // 正在看的文档被删掉了：不要继续显示旧内容。
+          setDoc(undefined);
+          setStatus(`${change.id} 已被删除`);
+        } else {
+          setStatus('文档读取失败');
+        }
+
         return;
       }
 
@@ -460,6 +472,19 @@ function Workspace() {
       void loadGitDiff(gitFile);
     }
   }, [gitOpen, gitFile, loadGitDiff]);
+
+  // 每次进审阅页默认选中第一个文件（只看一次），而不是让用户先面对一份混合 diff。
+  useEffect(() => {
+    if (!gitOpen) {
+      autoPickedRef.current = false;
+      return;
+    }
+
+    if (!autoPickedRef.current && git && git.changes.length > 0) {
+      autoPickedRef.current = true;
+      setGitFile(git.changes[0]!.path);
+    }
+  }, [gitOpen, git]);
 
   const save = useCallback(async () => {
     const current = stateRef.current;
@@ -555,6 +580,20 @@ function Workspace() {
       }
 
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        // 审阅页里方向键在文件之间移动，而不是切文档。
+        if (gitOpen) {
+          const files = git?.changes ?? [];
+          const index = files.findIndex(change => change.path === gitFile);
+          const next = files[index + (event.key === 'ArrowDown' ? 1 : -1)];
+
+          if (next) {
+            event.preventDefault();
+            setGitFile(next.path);
+          }
+
+          return;
+        }
+
         const index = flatDocs.findIndex(item => item.id === stateRef.current.selected);
 
         if (index === -1) {
@@ -572,7 +611,7 @@ function Workspace() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [save, flatDocs, gitOpen, selected, openDoc, navigate, searchParams]);
+  }, [save, flatDocs, gitOpen, selected, openDoc, navigate, searchParams, git, gitFile]);
 
   const cancelCreate = () => {
     setCreating(undefined);
@@ -676,6 +715,13 @@ function Workspace() {
     await loadGit();
     await loadGitDiff(undefined);
     await loadDocs();
+
+    // 提交完没什么可审的了，回到刚才那篇文档。
+    if (selected) {
+      openDoc(selected);
+    } else {
+      navigate('/');
+    }
   };
 
   const statusLabel = (change: GitChange): string => {
@@ -908,6 +954,13 @@ function Workspace() {
             onChange={event => setFilter(event.target.value)}
           />
         </div>
+        {git?.available && git.changes.length > 0 && (
+          <button className="review-cue" onClick={() => navigate('/changes')} type="button">
+            <GitCommitHorizontal size={12} />
+            {git.changes.length} 篇未提交
+            <span className="cue-action">审阅</span>
+          </button>
+        )}
         {hits ? (
           <section className="results">
             <p className="results-head">
@@ -984,6 +1037,12 @@ function Workspace() {
                         >
                           <span className="badge">{statusLabel(change)}</span>
                           <span className="path">{change.path}</span>
+                          {change.added !== undefined && (
+                            <span className="stat">
+                              <span className="add">+{change.added}</span>{' '}
+                              <span className="remove">−{change.removed ?? 0}</span>
+                            </span>
+                          )}
                         </button>
                       </li>
                     ))}

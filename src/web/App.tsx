@@ -197,6 +197,7 @@ function Workspace() {
   const [gitSides, setGitSides] = useState<{original: string; modified: string}>();
   const [gitMessage, setGitMessage] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
+  const [workspace, setWorkspace] = useState<{root: string; name: string}>();
 
   // 路由即状态：/d/<id> 看文档，?diff=1 看改动，/changes 看提交面板。
   const navigate = useNavigate();
@@ -278,6 +279,21 @@ function Workspace() {
     const payload = (await response.json()) as {docs: DocMeta[]};
     setDocs(payload.docs);
     return payload.docs;
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      const response = await fetch('/api/health');
+
+      if (!response.ok) {
+        return;
+      }
+
+      const payload = (await response.json()) as {root: string};
+      const name = payload.root.split('/').filter(Boolean).pop() ?? payload.root;
+      setWorkspace({root: payload.root, name});
+      document.title = `${name} · derivedoc`;
+    })();
   }, []);
 
   const loadDoc = useCallback(async (id: string) => {
@@ -862,11 +878,7 @@ function Workspace() {
     if (!node.doc) {
       const open = !collapsed.has(node.path);
       const label =
-        isRoot
-          ? node.name === 'source'
-            ? 'source · 你的决定'
-            : 'derived · agent 维护'
-          : node.name;
+        isRoot ? node.name.toUpperCase() : node.name;
 
       return (
         <li className={isRoot ? 'tree-root' : 'tree-folder'} key={node.path}>
@@ -954,7 +966,10 @@ function Workspace() {
     <div className="layout">
       <aside className="sidebar">
         <div className="brand">
-          <h1>derivedoc</h1>
+          <h1 title={workspace?.root ?? ''}>
+            <span className="workspace-name">{workspace?.name ?? '…'}</span>
+            <span className="product-name">derivedoc</span>
+          </h1>
           <input
             className="filter"
             placeholder="过滤…"

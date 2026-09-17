@@ -7,6 +7,7 @@ import {WebSocketServer} from 'ws';
 
 import type {DocStore} from '../core/store.ts';
 import {createApp} from './app.ts';
+import type {WorkspaceHub} from './hub.ts';
 import {createMcpServer} from './mcp.ts';
 
 export interface ServerOptions {
@@ -25,11 +26,11 @@ export interface RunningServer {
 }
 
 export async function startServer(
-  store: DocStore,
+  hub: WorkspaceHub,
   options: ServerOptions,
 ): Promise<RunningServer> {
   const host = options.host ?? '127.0.0.1';
-  const app = createApp(store);
+  const app = createApp(hub);
   const honoListener = getRequestListener(app.fetch);
   let devWatcher: {close(): Promise<void>} | undefined;
 
@@ -42,6 +43,16 @@ export async function startServer(
           error: {code: -32000, message: 'Method not allowed.'},
           id: null,
         }),
+      );
+      return;
+    }
+
+    const wsId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('ws') ?? hub.defaultId;
+    const store = await hub.get(wsId);
+
+    if (!store) {
+      res.writeHead(404, {'content-type': 'application/json'}).end(
+        JSON.stringify({jsonrpc: '2.0', error: {code: -32602, message: `没有这个工作区：${wsId}`}, id: null}),
       );
       return;
     }
@@ -103,10 +114,10 @@ export async function startServer(
   wss.on('connection', socket => {
     clients.add(socket);
     socket.on('close', () => clients.delete(socket));
-    socket.send(JSON.stringify({type: 'ready', root: store.root}));
+    socket.send(JSON.stringify({type: 'ready', defaultId: hub.defaultId}));
   });
 
-  const unsubscribe = store.onChange(change => {
+  const unsubscribe = hub.onChange(change => {
     broadcast(change);
   });
 
@@ -145,7 +156,7 @@ export async function startServer(
       await new Promise<void>(resolve => wss.close(() => resolve()));
       await devWatcher?.close();
       await new Promise<void>(resolve => server.close(() => resolve()));
-      await store.close();
+      await hub.close();
     },
   };
 }

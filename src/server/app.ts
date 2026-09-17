@@ -8,6 +8,7 @@ import {DocStoreError, isDocStoreError} from '../core/errors.ts';
 import {gitCommit, gitDiff, gitShow, gitStatus} from '../core/git.ts';
 import type {DocStore} from '../core/store.ts';
 import type {DocKind} from '../core/types.ts';
+import type {WorkspaceHub} from './hub.ts';
 
 /**
  * 前端产物位置。打包后 server 代码可能在 bld/cli/chunks 里，所以从当前文件往上找
@@ -71,47 +72,80 @@ function errorResponse(error: unknown): Response {
   return Response.json({error: {code: 'internal', message: String(error)}}, {status: 500});
 }
 
-export function createApp(store: DocStore): Hono {
+export function createApp(hub: WorkspaceHub): Hono {
   const app = new Hono();
 
+  /** 每次请求解析工作区：?ws=<id>，缺省用启动时的工作区。 */
+  const withStore = async (
+    c: Context,
+    handler: (store: DocStore) => Response | Promise<Response>,
+  ): Promise<Response> => {
+    const id = c.req.query('ws') ?? hub.defaultId;
+
+    try {
+      const store = await hub.get(id);
+
+      if (!store) {
+        return c.json({error: {code: 'not_found', message: `没有这个工作区：${id}`}}, 404);
+      }
+
+      return await handler(store);
+    } catch (error) {
+      return errorResponse(error);
+    }
+  };
+
+  app.get('/api/workspaces', async c => c.json({workspaces: await hub.list(), defaultId: hub.defaultId}));
+
+  app.post('/api/workspaces', async c => {
+    const body = (await c.req.json().catch(() => ({}))) as {root?: unknown};
+
+    if (typeof body.root !== 'string' || !body.root.trim()) {
+      return c.json({error: {code: 'invalid_id', message: '需要一个工作区路径'}}, 400);
+    }
+
+    try {
+      return c.json({workspace: await hub.add(body.root.trim())});
+    } catch (error) {
+      return c.json({error: {code: 'invalid_id', message: String((error as Error).message)}}, 400);
+    }
+  });
+
   app.get('/api/health', c =>
-    c.json({ok: true, root: store.root, docs: store.list().length}),
+    withStore(c, store => c.json({ok: true, root: store.root, docs: store.list().length})),
   );
 
-  app.get('/api/docs', c => {
-    const kind = c.req.query('kind');
-    return c.json({docs: store.list(kind === 'source' || kind === 'derived' ? {kind: kind as DocKind} : {})});
-  });
+  app.get('/api/docs', c =>
+    withStore(c, store => {
+      const kind = c.req.query('kind');
+      return c.json({
+        docs: store.list(kind === 'source' || kind === 'derived' ? {kind: kind as DocKind} : {}),
+      });
+    }),
+  );
 
-  app.get('/api/search', c => c.json({hits: store.search(c.req.query('q') ?? '')}));
+  app.get('/api/search', c =>
+    withStore(c, store => c.json({hits: store.search(c.req.query('q') ?? '')})),
+  );
 
-  app.get('/api/git/status', async c => {
-    try {
-      return c.json(await gitStatus(store.root));
-    } catch (error) {
-      return errorResponse(error);
-    }
-  });
+  app.get('/api/git/status', c => withStore(c, async store => c.json(await gitStatus(store.root))));
 
-  app.get('/api/git/diff', async c => {
-    try {
-      return c.json({diff: await gitDiff(store.root, c.req.query('path'))});
-    } catch (error) {
-      return errorResponse(error);
-    }
-  });
+  app.get('/api/git/diff', c =>
+    withStore(c, async store => c.json({diff: await gitDiff(store.root, c.req.query('path'))})),
+  );
 
-  app.get('/api/git/show', async c => {
-    const file = c.req.query('path');
+  app.get('/api/git/show', c =>
+    withStore(c, async store => {
+      const file = c.req.query('path');
 
-    if (!file) {
-      return c.json({error: {code: 'invalid_id', message: '缺少 path'}}, 400);
-    }
+      if (!file) {
+        return c.json({error: {code: 'invalid_id', message: '缺少 path'}}, 400);
+      }
 
-    try {
+      const rootPrefix = path.resolve(store.root) + path.sep;
       const absolute = path.resolve(store.root, file);
 
-      if (!absolute.startsWith(path.resolve(store.root) + path.sep)) {
+      if (!absolute.startsWith(rootPrefix)) {
         return c.json({error: {code: 'invalid_id', message: 'path 越出工作区'}}, 400);
       }
 
@@ -123,15 +157,12 @@ export function createApp(store: DocStore): Hono {
       }
 
       return c.json({original, modified});
-    } catch (error) {
-      return errorResponse(error);
-    }
-  });
+    }),
+  );
 
-  app.post('/api/git/commit', async c => {
-    const body = (await c.req.json().catch(() => ({}))) as {message?: unknown};
-
-    try {
+  app.post('/api/git/commit', c =>
+    withStore(c, async store => {
+      const body = (await c.req.json().catch(() => ({}))) as {message?: unknown};
       const status = await gitStatus(store.root);
       const message =
         typeof body.message === 'string' && body.message.trim()
@@ -139,19 +170,17 @@ export function createApp(store: DocStore): Hono {
           : (status.message ?? '');
       const result = await gitCommit(store.root, message);
       return result.ok ? c.json(result) : c.json(result, 400);
-    } catch (error) {
-      return errorResponse(error);
-    }
-  });
+    }),
+  );
 
-  app.get('/api/doc', c => {
-    const id = c.req.query('id');
+  app.get('/api/doc', c =>
+    withStore(c, store => {
+      const id = c.req.query('id');
 
-    if (!id) {
-      return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
-    }
+      if (!id) {
+        return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
+      }
 
-    try {
       const doc = store.read(id);
       return c.json({
         id: doc.id,
@@ -164,45 +193,41 @@ export function createApp(store: DocStore): Hono {
         frontmatter: doc.frontmatter,
         body: doc.body,
       });
-    } catch (error) {
-      return errorResponse(error);
-    }
-  });
+    }),
+  );
 
-  app.get('/api/backlinks', c => {
-    const id = c.req.query('id');
+  app.get('/api/backlinks', c =>
+    withStore(c, store => {
+      const id = c.req.query('id');
 
-    if (!id) {
-      return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
-    }
+      if (!id) {
+        return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
+      }
 
-    try {
       return c.json({docs: store.backlinks(id)});
-    } catch (error) {
-      return errorResponse(error);
-    }
-  });
+    }),
+  );
 
-  const write = (createOnly: boolean) => async (c: Context) => {
-    const id = c.req.query('id');
+  const write = (createOnly: boolean) => async (c: Context) =>
+    withStore(c, async store => {
+      const id = c.req.query('id');
 
-    if (!id) {
-      return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
-    }
+      if (!id) {
+        return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
+      }
 
-    let payload: {content?: unknown; baseRevision?: unknown};
+      let payload: {content?: unknown; baseRevision?: unknown};
 
-    try {
-      payload = await c.req.json();
-    } catch {
-      return c.json({error: {code: 'invalid_content', message: '请求体不是合法 JSON'}}, 400);
-    }
+      try {
+        payload = await c.req.json();
+      } catch {
+        return c.json({error: {code: 'invalid_content', message: '请求体不是合法 JSON'}}, 400);
+      }
 
-    if (typeof payload.content !== 'string') {
-      return c.json({error: {code: 'invalid_content', message: '缺少 content'}}, 400);
-    }
+      if (typeof payload.content !== 'string') {
+        return c.json({error: {code: 'invalid_content', message: '缺少 content'}}, 400);
+      }
 
-    try {
       const doc = await store.write(id, payload.content, {
         ...(createOnly ? {createOnly: true} : {}),
         ...(typeof payload.baseRevision === 'string'
@@ -210,28 +235,23 @@ export function createApp(store: DocStore): Hono {
           : {}),
       });
       return c.json({id: doc.id, revision: doc.revision, updatedAt: doc.updatedAt});
-    } catch (error) {
-      return errorResponse(error);
-    }
-  };
+    });
 
   app.put('/api/doc', write(false));
   app.post('/api/doc', write(true));
 
-  app.delete('/api/doc', async c => {
-    const id = c.req.query('id');
+  app.delete('/api/doc', c =>
+    withStore(c, async store => {
+      const id = c.req.query('id');
 
-    if (!id) {
-      return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
-    }
+      if (!id) {
+        return c.json({error: {code: 'invalid_id', message: '缺少 id'}}, 400);
+      }
 
-    try {
       await store.remove(id);
       return c.json({ok: true});
-    } catch (error) {
-      return errorResponse(error);
-    }
-  });
+    }),
+  );
 
   app.get('*', async c => {
     const url = new URL(c.req.url);

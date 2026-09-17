@@ -18,7 +18,15 @@ const payload = JSON.parse(await readStdin());
 const prompt = typeof payload.prompt === 'string' ? payload.prompt : '';
 const sessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
 
-if (!root || !prompt.trim() || !sessionId) {
+if (!prompt.trim() || !sessionId) {
+  process.exit(0);
+}
+
+// 钩子的 shell 只在「cwd 位于工作区内」时直接给路径；其余情况（比如在仓库根里工作，
+// 工作区是它下面的 prd/）由这里查注册表，挑最近打开、且位于当前目录之下的那个。
+const workspaceRoot = root || (await resolveWorkspaceFromRegistry(payload.cwd));
+
+if (!workspaceRoot) {
   process.exit(0);
 }
 
@@ -28,14 +36,14 @@ if (process.env.DERIVEDOC_HOOK_PROBE) {
   process.exit(0);
 }
 
-const pendingDir = path.join(root, '.derivedoc', 'pending');
+const pendingDir = path.join(workspaceRoot, '.derivedoc', 'pending');
 await fs.mkdir(pendingDir, {recursive: true});
 
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const outFile = path.join(pendingDir, `${stamp}-${payload.turn_id ?? 'turn'}.md`);
-const logFile = path.join(root, '.derivedoc', 'capture.log');
+const logFile = path.join(workspaceRoot, '.derivedoc', 'capture.log');
 
-const before = await listRevisions(root);
+const before = await listRevisions(workspaceRoot);
 const startedAt = Date.now();
 const child = spawn(
   'codex',
@@ -48,14 +56,14 @@ const child = spawn(
     '-c',
     'sandbox_mode="workspace-write"',
     '-c',
-    `sandbox_workspace_write.writable_roots=["${root}"]`,
+    `sandbox_workspace_write.writable_roots=["${workspaceRoot}"]`,
     '-c',
     'approval_policy="never"',
     '-o',
     outFile,
-    buildInstruction(root, prompt),
+    buildInstruction(workspaceRoot, prompt),
   ],
-  {cwd: root, env: {...process.env, DERIVEDOC_CAPTURE: '1'}, stdio: ['ignore', 'pipe', 'pipe']},
+  {cwd: workspaceRoot, env: {...process.env, DERIVEDOC_CAPTURE: '1'}, stdio: ['ignore', 'pipe', 'pipe']},
 );
 
 let stderr = '';
@@ -67,7 +75,7 @@ const code = await new Promise(resolve => child.on('close', resolve));
 clearTimeout(timer);
 
 const elapsed = Date.now() - startedAt;
-const after = await listRevisions(root);
+const after = await listRevisions(workspaceRoot);
 let thinking = '';
 
 try {
@@ -92,7 +100,7 @@ await fs.appendFile(
 if (code !== 0 || !thinking) {
   await fs.rm(outFile, {force: true});
   emit(
-    `derivedoc：这条消息的捕获没有产出（退出码 ${code}）。详情见 ${path.relative(root, logFile)}。`,
+    `derivedoc：这条消息的捕获没有产出（退出码 ${code}）。详情见 ${path.relative(workspaceRoot, logFile)}。`,
   );
   process.exit(0);
 }
@@ -104,7 +112,7 @@ const changed = [...after]
 emit(
   [
     'derivedoc：这条用户消息已经过一轮捕获。',
-    `推理过程在 ${path.relative(root, outFile)}（完整但精简，需要时自己读它）。`,
+    `推理过程在 ${path.relative(workspaceRoot, outFile)}（完整但精简，需要时自己读它）。`,
     changed.length > 0
       ? `本轮更新的文档：${changed.join('、')}。`
       : '本轮没有文档变更（这条消息没有产生需要沉淀的决定）。',
@@ -170,6 +178,8 @@ function buildInstruction(root, prompt) {
     `   文档，用 \`dd ${root} append <id> '## 决定：……'\`（必要时先建新文档，内容保持`,
     '   高层精简）。没有决定就不要写——提问、确认、局部细节调整都不要写进 source。',
     '   只写决定本身，不要写测试记录、验证步骤、待办、计划、过程回顾这类内容。',
+    '   只有用户明确表达方向、约束或取舍时才写；实现细节、命名、代码怎么写这类你自己拿的',
+    '   主意不算决定，不要写成「决定」。拿不准就不写，宁缺毋滥。',
     '3. 默认不动 derived。只有这条消息明确改变了设计，且你能指出具体是哪一节时，才改那一',
     '   节；不要调整文档结构，不要新增「验证」「下一步」「待办」之类的小节。不确定就留着',
     '   不动。',
@@ -191,4 +201,33 @@ async function readStdin() {
   }
 
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * cwd 不在任何工作区里时，看它下面有没有注册过的工作区（例如在仓库根工作、工作区是
+ * 它下面的 prd/）。注册表按最近打开排序，取第一个匹配的。
+ */
+async function resolveWorkspaceFromRegistry(cwd) {
+  if (typeof cwd !== 'string' || !cwd) {
+    return undefined;
+  }
+
+  const target = path.resolve(cwd);
+
+  let entries;
+
+  try {
+    const {listWorkspaces} = await import(new URL('../../src/core/registry.ts', import.meta.url));
+    entries = await listWorkspaces();
+  } catch {
+    return undefined;
+  }
+
+  for (const entry of entries) {
+    if (entry.root === target || entry.root.startsWith(`${target}/`)) {
+      return entry.root;
+    }
+  }
+
+  return undefined;
 }

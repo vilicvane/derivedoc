@@ -123,9 +123,9 @@ textarea {
 
 .review-cue {
   align-items: center;
-  background: var(--surface-2);
-  border: none;
-  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
   color: var(--ink-2);
   cursor: pointer;
   display: flex;
@@ -141,7 +141,14 @@ textarea {
 
 .review-cue:hover {
   background: var(--paper-raised);
+  border-color: color-mix(in srgb, var(--source) 40%, var(--rule));
   color: var(--ink);
+}
+
+.review-cue:hover .cue-action {
+  color: var(--source);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .review-cue .cue-action {
@@ -150,11 +157,29 @@ textarea {
 }
 
 .brand h1 {
+  align-items: baseline;
+  display: flex;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.workspace-name {
+  color: var(--ink);
   font-family: var(--serif);
   font-size: 1rem;
   font-weight: 600;
   letter-spacing: 0.01em;
-  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-name {
+  color: var(--ink-4);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
 }
 
 .filter {
@@ -441,7 +466,7 @@ textarea {
   align-items: flex-start;
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: 4px;
   color: inherit;
   cursor: pointer;
   display: flex;

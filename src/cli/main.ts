@@ -3,7 +3,8 @@ import process from 'node:process';
 import path from 'node:path';
 
 import {initProject} from '../core/project.ts';
-import {DocStore} from '../core/store.ts';
+import type {DocStore} from '../core/store.ts';
+import type {WorkspaceHub} from '../server/hub.ts';
 import {CliError, parseArgs} from './args.ts';
 import {reportError, runCommand} from './commands.ts';
 
@@ -118,27 +119,33 @@ async function serve(
   }
 
   const init = await initProject(dir);
-  const store = await DocStore.open(dir);
   // 服务栈（Hono、MCP、ws）只在真正要起服务时加载，普通子命令不必付这份成本。
-  const {startServer} = await import('../server/index.ts');
+  const [{startServer}, {WorkspaceHub}, {DocStore}] = await Promise.all([
+    import('../server/index.ts'),
+    import('../server/hub.ts'),
+    import('../core/store.ts'),
+  ]);
+  const hub = await WorkspaceHub.open(dir);
   const packageRoot = dev ? await findPackageRoot() : undefined;
 
   if (dev && !packageRoot) {
     throw new CliError('找不到 vite.config.ts，--dev 需要在源码仓库里运行');
   }
 
-  const server = await startServer(store, {
+  const server = await startServer(hub, {
     port: portNumber,
     ...(typeof host === 'string' ? {host} : {}),
     ...(packageRoot ? {dev: {configFile: path.join(packageRoot, 'vite.config.ts')}} : {}),
   });
 
-  const counts = countByKind(store);
+  const counts = await countByKind(hub);
+  const portNote =
+    server.port === portNumber ? '' : `（${portNumber} 被占用，顺延到 ${server.port}）`;
 
   process.stdout.write(
     [
-      `derivedoc  ${server.url}`,
-      `  项目目录  ${store.root}${init.created.length ? `（新建 ${init.created.join('、')}）` : ''}`,
+      `derivedoc  ${server.url}${portNote}`,
+      `  工作区    ${path.resolve(dir)}${init.created.length ? `（新建 ${init.created.join('、')}）` : ''}`,
       `  文档      source ${counts.source} · derived ${counts.derived}`,
       `  MCP       ${server.mcpUrl}`,
       ...(dev ? ['  模式      dev（Vite watch 构建，改完自动刷新页面）'] : []),
@@ -174,8 +181,9 @@ async function serve(
   process.on('SIGTERM', () => void shutdown());
 }
 
-function countByKind(store: DocStore): {source: number; derived: number} {
-  const docs = store.list();
+async function countByKind(hub: WorkspaceHub): Promise<{source: number; derived: number}> {
+  const store = await hub.get(hub.defaultId);
+  const docs = store?.list() ?? [];
 
   return {
     source: docs.filter(doc => doc.kind === 'source').length,

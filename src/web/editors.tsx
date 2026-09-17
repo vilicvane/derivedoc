@@ -124,9 +124,11 @@ const EDITOR_OPTIONS = {
 export function MarkdownEditor({
   value,
   onChange,
+  autoFocus = false,
 }: {
   value: string;
   onChange: (value: string) => void;
+  autoFocus?: boolean;
 }) {
   const theme = useTheme();
 
@@ -135,6 +137,11 @@ export function MarkdownEditor({
       <Editor
         language="markdown"
         onChange={next => onChange(next ?? '')}
+        onMount={editor => {
+          if (autoFocus) {
+            editor.focus();
+          }
+        }}
         options={EDITOR_OPTIONS}
         theme={theme}
         value={value}

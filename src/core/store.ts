@@ -25,6 +25,8 @@ function snippetOf(body: string, index: number, length: number): string {
 export interface WriteOptions {
   /** 期望的当前修订号；不匹配则冲突。省略表示不做并发校验。 */
   baseRevision?: string;
+  /** 只允许新建：文档已存在时报 exists。 */
+  createOnly?: boolean;
 }
 
 export interface ListOptions {
@@ -124,6 +126,10 @@ export class DocStore {
     kindOfId(normalized);
 
     const current = this.#index.get(normalized);
+
+    if (options.createOnly && current) {
+      throw new DocStoreError('exists', `文档已存在：${normalized}`, {id: normalized});
+    }
 
     if (options.baseRevision !== undefined) {
       if (!current) {

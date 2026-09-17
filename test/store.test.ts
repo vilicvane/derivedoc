@@ -134,6 +134,28 @@ test('append 把内容接到文末', async () => {
   }
 });
 
+test('createOnly 只在新建时通过', async () => {
+  const dir = await createProject();
+  const store = await DocStore.open(dir);
+
+  try {
+    await store.write('derived/plan', '# 方案\n', {createOnly: true});
+
+    await assert.rejects(
+      () => store.write('derived/plan', '# 方案\n\n改了。\n', {createOnly: true}),
+      (error: unknown) => {
+        assert.ok(error instanceof DocStoreError);
+        assert.equal(error.code, 'exists');
+        return true;
+      },
+    );
+
+    assert.equal(store.read('derived/plan').body, '# 方案\n');
+  } finally {
+    await store.close();
+  }
+});
+
 test('不合法的 id 会被拒绝', async () => {
   const dir = await createProject();
   const store = await DocStore.open(dir);

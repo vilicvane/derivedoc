@@ -176,7 +176,7 @@ export function createApp(store: DocStore): Hono {
     }
   });
 
-  const write = async (c: Context) => {
+  const write = (createOnly: boolean) => async (c: Context) => {
     const id = c.req.query('id');
 
     if (!id) {
@@ -197,6 +197,7 @@ export function createApp(store: DocStore): Hono {
 
     try {
       const doc = await store.write(id, payload.content, {
+        ...(createOnly ? {createOnly: true} : {}),
         ...(typeof payload.baseRevision === 'string'
           ? {baseRevision: payload.baseRevision}
           : {}),
@@ -207,8 +208,8 @@ export function createApp(store: DocStore): Hono {
     }
   };
 
-  app.put('/api/doc', write);
-  app.post('/api/doc', write);
+  app.put('/api/doc', write(false));
+  app.post('/api/doc', write(true));
 
   app.delete('/api/doc', async c => {
     const id = c.req.query('id');
@@ -243,11 +244,22 @@ export function createApp(store: DocStore): Hono {
       const type = CONTENT_TYPES[path.extname(filePath)] ?? 'application/octet-stream';
       return new Response(new Uint8Array(body), {headers: {'content-type': type}});
     } catch {
-      if (relative === '/index.html') {
-        return c.html(PLACEHOLDER);
+      // SPA 路由：不是静态资源的路径一律交给前端路由，用 index.html 兜底。
+      const isAsset = path.extname(relative) !== '';
+
+      if (!isAsset) {
+        const fallback = await fsp
+          .readFile(path.join(WEB_ROOT, 'index.html'))
+          .catch(() => undefined);
+
+        if (fallback) {
+          return new Response(new Uint8Array(fallback), {
+            headers: {'content-type': 'text/html; charset=utf-8'},
+          });
+        }
       }
 
-      return c.text('not found', 404);
+      return relative === '/index.html' ? c.html(PLACEHOLDER) : c.text('not found', 404);
     }
   });
 

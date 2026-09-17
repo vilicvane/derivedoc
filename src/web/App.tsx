@@ -4,10 +4,21 @@ import {
   Check,
   Columns2,
   GitCommitHorizontal,
+  Plus,
   RotateCw,
   Trash2,
+  X,
 } from 'lucide-react';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from 'react-router';
 
 import {diffLines, formatSummary, parseGitDiff, summarizeDiff} from '../core/diff.ts';
 import {resolveDocId} from '../core/links.ts';
@@ -143,8 +154,18 @@ function fileName(id: string): string {
 }
 
 export function App() {
+  return (
+    <Routes>
+      <Route element={<Workspace />} path="/" />
+      <Route element={<Workspace />} path="/d/*" />
+      <Route element={<Workspace />} path="/changes" />
+      <Route element={<Navigate replace to="/" />} path="*" />
+    </Routes>
+  );
+}
+
+function Workspace() {
   const [docs, setDocs] = useState<DocMeta[]>([]);
-  const [selected, setSelected] = useState<string>();
   const [doc, setDoc] = useState<Doc>();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [incoming, setIncoming] = useState<Incoming>();
@@ -152,25 +173,45 @@ export function App() {
   const [filter, setFilter] = useState('');
   const [creating, setCreating] = useState<DocKind>();
   const [newId, setNewId] = useState('');
-  const [diffMode, setDiffMode] = useState<'file' | 'incoming'>();
   const [fileDiff, setFileDiff] = useState<{original: string; modified: string}>();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [git, setGit] = useState<GitStatus>();
-  const [gitOpen, setGitOpen] = useState(false);
   const [gitFile, setGitFile] = useState<string>();
   const [gitDiffText, setGitDiffText] = useState('');
   const [gitSides, setGitSides] = useState<{original: string; modified: string}>();
   const [gitMessage, setGitMessage] = useState('');
   const [gitBusy, setGitBusy] = useState(false);
 
+  // 路由即状态：/d/<id> 看文档，?diff=1 看改动，/changes 看提交面板。
+  const navigate = useNavigate();
+  const params = useParams();
+  const {pathname} = useLocation();
+  const [searchParams] = useSearchParams();
+  const selected = params['*'] ? decodeURIComponent(params['*']) : undefined;
+  const gitOpen = pathname.startsWith('/changes');
+  const diffMode: 'file' | 'incoming' | undefined = incoming
+    ? 'incoming'
+    : searchParams.get('diff') === '1'
+      ? 'file'
+      : undefined;
+
+  const openDoc = useCallback(
+    (id: string, options: {diff?: boolean} = {}) => {
+      setIncoming(undefined);
+      navigate(`/d/${id}${options.diff ? '?diff=1' : ''}`);
+    },
+    [navigate],
+  );
+
   const draft = selected ? drafts[selected] ?? doc?.body ?? '' : '';
   const dirty = doc !== undefined && draft !== doc.body;
 
   const stateRef = useRef({doc, draft, selected});
   const pendingWriteRef = useRef<{id: string; body: string} | undefined>(undefined);
+  const focusEditorRef = useRef(false);
   stateRef.current = {doc, draft, selected};
 
   const notify = useCallback((text: string) => {
@@ -231,7 +272,6 @@ export function App() {
     const payload = (await response.json()) as Doc;
     setDoc(payload);
     setIncoming(undefined);
-    setDiffMode(undefined);
     setDrafts(current => {
       const next = {...current};
       delete next[id];
@@ -290,14 +330,18 @@ export function App() {
 
   useEffect(() => {
     void loadDocs().then(list => {
+      if (pathname.startsWith('/changes') || selected) {
+        return;
+      }
+
       const first = list.find(item => item.kind === 'source') ?? list[0];
 
       if (first) {
-        setSelected(first.id);
+        navigate(`/d/${first.id}`, {replace: true});
       }
     });
     void loadGit();
-  }, [loadDocs, loadGit]);
+  }, [loadDocs, loadGit, pathname, selected, navigate]);
 
   useEffect(() => {
     if (!selected) {
@@ -305,7 +349,7 @@ export function App() {
     }
 
     setStatus('');
-    setDiffMode(undefined);
+    setIncoming(undefined);
     void loadDoc(selected);
     void loadBacklinks(selected);
   }, [selected, loadDoc, loadBacklinks]);
@@ -459,7 +503,12 @@ export function App() {
       }
 
       if (event.key === 'Escape') {
-        setDiffMode(undefined);
+        setIncoming(undefined);
+
+        if (searchParams.get('diff') === '1' && selected) {
+          navigate(`/d/${selected}`, {replace: true});
+        }
+
         return;
       }
 
@@ -486,7 +535,7 @@ export function App() {
 
         if (next) {
           event.preventDefault();
-          setSelected(next.id);
+          openDoc(next.id);
         }
       }
     };
@@ -514,14 +563,31 @@ export function App() {
 
     if (!response.ok) {
       const payload = (await response.json()) as {error?: {message: string}};
-      setStatus(`创建失败：${payload.error?.message ?? response.status}`);
+      setStatus(
+        response.status === 400 && /已存在/.test(payload.error?.message ?? '')
+          ? `已存在同名文档：${fullId}`
+          : `创建失败：${payload.error?.message ?? response.status}`,
+      );
       return;
     }
 
     setCreating(undefined);
     setNewId('');
     await loadDocs();
-    setSelected(fullId);
+    // 新文档先展开它所在的目录，再进编辑器（而不是 diff）。
+    setCollapsed(current => {
+      const next = new Set(current);
+      let prefix = '';
+
+      for (const segment of fullId.split('/').slice(0, -1)) {
+        prefix = prefix ? `${prefix}/${segment}` : segment;
+        next.delete(prefix);
+      }
+
+      return next;
+    });
+    focusEditorRef.current = true;
+    openDoc(fullId, {diff: false});
   };
 
   const removeDoc = async () => {
@@ -544,12 +610,13 @@ export function App() {
 
     setStatus(`${doc.id} 已删除`);
     setDoc(undefined);
-    setSelected(undefined);
     const list = await loadDocs();
     const next = list.find(item => item.kind === 'source') ?? list[0];
 
     if (next) {
-      setSelected(next.id);
+      openDoc(next.id, {diff: false});
+    } else {
+      navigate('/');
     }
   };
 
@@ -644,11 +711,10 @@ export function App() {
 
   /** 打开文档：有改动就先进 diff，没有就直接进编辑器。 */
   const selectDoc = (id: string) => {
-    setSelected(id);
     const target = docs.find(item => item.id === id);
     const hasDraft = drafts[id] !== undefined;
     const hasGitChange = target ? changeByPath.has(target.relPath) : false;
-    setDiffMode(hasDraft || hasGitChange ? 'file' : undefined);
+    openDoc(id, {diff: !hasDraft && hasGitChange});
   };
 
   const onContentClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -733,7 +799,7 @@ export function App() {
                 title={`新建 ${node.name} 文档`}
                 type="button"
               >
-                ＋
+                <Plus size={12} />
               </button>
             )}
           </div>
@@ -832,8 +898,8 @@ export function App() {
                 }
               }}
             />
-            <button disabled={busy} type="submit">
-              建
+            <button aria-label="创建" disabled={busy} type="submit" title="创建（回车）">
+              <Plus size={13} />
             </button>
           </form>
         )}
@@ -843,15 +909,20 @@ export function App() {
           <section className="git pane">
             <header>
               <div>
-                <h2>待提交的文档改动</h2>
+                <h2>审阅改动</h2>
                 <p className="meta">
                   {git?.branch ? `分支 ${git.branch} · ` : ''}
-                  范围 source/ 与 derived/
+                  {git ? `${git.changes.length} 个文件` : ''} · 只提交 source/ 与 derived/
                 </p>
               </div>
               <div className="actions">
-                <button onClick={() => setGitOpen(false)} type="button">
-                  回到文档
+                <button
+                  onClick={() => (selected ? openDoc(selected) : navigate('/'))}
+                  title="回到文档"
+                  type="button"
+                >
+                  <X size={14} />
+                  关闭
                 </button>
               </div>
             </header>
@@ -939,7 +1010,7 @@ export function App() {
               <div className="actions">
                 {git?.available && (
                   <button
-                    onClick={() => setGitOpen(value => !value)}
+                    onClick={() => (gitOpen && selected ? openDoc(selected) : navigate('/changes'))}
                     title="待提交的文档改动"
                     type="button"
                   >
@@ -949,7 +1020,7 @@ export function App() {
                 )}
                 {(dirty || changeByPath.has(doc.relPath)) && (
                   <button
-                    onClick={() => setDiffMode(mode => (mode === 'file' ? undefined : 'file'))}
+                    onClick={() => openDoc(doc.id, {diff: diffMode !== 'file'})}
                     title={diffMode === 'file' ? '回到编辑' : '看相对上次提交的改动'}
                     type="button"
                   >
@@ -982,7 +1053,7 @@ export function App() {
               <div className="banner">
                 <span>磁盘上出现了新版本。</span>
                 <button
-                  onClick={() => setDiffMode(mode => (mode === 'incoming' ? undefined : 'incoming'))}
+                  onClick={() => setIncoming(current => (current ? undefined : incoming))}
                   type="button"
                 >
                   看差异
@@ -996,7 +1067,6 @@ export function App() {
                     });
                     setDoc({...doc, body: incoming.body, revision: incoming.revision});
                     setIncoming(undefined);
-                    setDiffMode(undefined);
                     setStatus('已载入磁盘版本，草稿丢弃');
                   }}
                   type="button"
@@ -1031,7 +1101,7 @@ export function App() {
                     <span className="add">+{diff.summary.added}</span>{' '}
                     <span className="remove">−{diff.summary.removed}</span>
                   </span>
-                  <button onClick={() => setDiffMode(undefined)} type="button">
+                  <button onClick={() => openDoc(doc.id)} type="button">
                     关闭
                   </button>
                 </div>
@@ -1044,6 +1114,7 @@ export function App() {
               </section>
             ) : (
               <MarkdownEditor
+                autoFocus={focusEditorRef.current}
                 onChange={value => setDrafts(current => ({...current, [doc.id]: value}))}
                 value={draft}
               />

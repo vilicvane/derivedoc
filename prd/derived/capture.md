@@ -14,15 +14,17 @@ agent 自觉。
 - `UserPromptSubmit` 钩子：先做一次向上查找 `.derivedoc` 的廉价判定，不在工作区直接放行。
 - 钩子是**阻塞**的：实测钩子 sleep 6s，整轮耗时从 5.6s 变成 10.7s。整条链路依赖这一点
   ——子会话必须在主模型开始生成之前跑完。
-- `capture.mjs`：从钩子 payload 取 `session_id` / `cwd` / `prompt`，用
+- `src/hooks/codex.ts`：从钩子 payload 取 `session_id` / `cwd` / `prompt`，用
   `codex exec fork <session_id> --ephemeral` 起一次性子会话，限定
   `sandbox_mode=workspace-write` 且可写根只有工作区；子会话的最终回复落在
   `.derivedoc/pending/`，运行记录落在 `.derivedoc/capture.log`。
+- `derivedoc init` 创建项目自己维护的 `DERIVEDOC.md`，并将项目级钩子合并进
+  `.codex/hooks.json`。捕获子会话与主 agent 都收到同一份项目规则。
+- 捕获结束时把 pending 位置和项目规则回传主会话；项目规则明确要求主 agent
+  在结束任务前核对并回收相关 TODO。
 - 钩子配置里的 `timeout` 必须放宽（当前 600s）。默认 15s 会把捕获子会话掐断，表现是静默
   失败、pending 里没有产物。
 - 递归防护：子会话进程带 `DERIVEDOC_CAPTURE=1`，钩子看到就直接放行。
-
-未完成：把 pending 里的思考位置回传主会话，并在有 derivedoc 提示时原文附带提示。
 
 已知成本：一次捕获要 80–160 秒（子会话继承主会话上下文后跑一轮完整推理），这段时间用户
 在等。后续优化方向：换更小的模型、缩小给子会话的上下文，或先用廉价判定筛掉不需要捕获

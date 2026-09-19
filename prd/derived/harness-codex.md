@@ -2,7 +2,7 @@
 
 **依据**：[对话如何进入文档](../source/capture.md)
 
-以下是在 Codex CLI 0.154.0 上实测过的结论，是 [对话捕获](capture.md) 落地的前提。
+以下是在 Codex CLI 0.155.1 上实测过的结论，是 [对话捕获](capture.md) 落地的前提。
 
 ## 钩子
 
@@ -10,8 +10,10 @@
   `SessionEnd`、`SubagentStart/Stop`、`PreToolUse`、`PostToolUse`、`PermissionRequest`、
   `Interrupt`。
 - 钩子可以执行命令，也可以调用 MCP 工具；命令钩子支持 `async`，不会卡住当前这一轮。
-- 钩子文件位置固定在 `$CODEX_HOME/hooks.json`，config.toml 里的 `hooks` 是结构体，
-  不能用 `-c hooks=<path>` 指向别处。
+- derivedoc 的捕获钩子放在项目级 `<repo>/.codex/hooks.json`，不在用户级
+  `$CODEX_HOME/hooks.json` 保留该钩子。
+- `derivedoc init` 合并 `UserPromptSubmit` 条目，命令为
+  `derivedoc hook codex-prompt-submit`；已有钩子与项目规则不被覆盖。
 
 ## fork
 

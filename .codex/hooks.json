@@ -1,0 +1,17 @@
+{
+  "description": "Project-local hooks for derivedoc.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/scripts/hooks/codex-prompt-submit.sh\"",
+            "timeout": 600,
+            "statusMessage": "derivedoc 正在沉淀这条消息…"
+          }
+        ]
+      }
+    ]
+  }
+}

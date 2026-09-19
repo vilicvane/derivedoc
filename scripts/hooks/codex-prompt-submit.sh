@@ -21,10 +21,12 @@ dir=$(cd "$cwd" 2>/dev/null && pwd) || exit 0
 
 while [ "$dir" != / ]; do
   if [ -d "$dir/.derivedoc" ]; then
-    printf '%s' "$payload" | DERIVEDOC_CAPTURE=1 exec node "$(dirname "$0")/capture.mjs" "$dir"
+    # 管道右侧运行在子 shell 中，不能靠 exec 结束当前脚本；显式退出以免继续走兜底分支。
+    printf '%s' "$payload" | node "$(dirname "$0")/capture.mjs" "$dir"
+    exit $?
   fi
   dir=$(dirname "$dir")
 done
 
 # 往上找不到：可能项目在当前目录下面（当前目录是它的父级），交给 node 查注册表。
-printf '%s' "$payload" | DERIVEDOC_CAPTURE=1 exec node "$(dirname "$0")/capture.mjs" ""
+printf '%s' "$payload" | node "$(dirname "$0")/capture.mjs" ""

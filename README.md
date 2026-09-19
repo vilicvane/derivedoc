@@ -10,8 +10,22 @@
 
 ```sh
 npm install
+npm run build
+npm run dd -- init        # 初始化本项目：文档、项目规则和 Codex 钩子
 npm run dd                # 在项目里起服务，打印 web 地址与 MCP 接入方式
 ```
+
+安装后在其它项目中使用：
+
+```sh
+derivedoc init                     # 默认把文档放在 ddoc/
+derivedoc init --doc-dir=prd       # 或者指定文档目录
+```
+
+`init` 会建立 `.derivedoc/config.json`、两层文档、项目自己维护的
+`DERIVEDOC.md` 和项目级 `.codex/hooks.json`。已有的项目规则不会被覆盖，已有
+Codex 钩子会保留并合并 derivedoc 的 `UserPromptSubmit` 条目。钩子调用 `derivedoc`
+命令，因此它需要在 Codex 进程的 `PATH` 中；初次安装或修改钩子后新开会话。
 
 服务不是必须的。文档读写直接走 CLI 就行，只有需要界面或 MCP 时才起服务：
 
@@ -48,6 +62,9 @@ codex mcp add derivedoc --url http://127.0.0.1:7788/mcp
 
 ```text
 .derivedoc/      本地数据：对话记录、待审阅改动、记下的文档目录
+.codex/hooks.json
+                 Codex 项目级捕获钩子
+DERIVEDOC.md     项目自己维护的捕获与待办规则
 ddoc/            文档目录，默认叫这个名字
   source/        人提出的需求与讨论后定下的决定
   derived/       agent 据此维护的设计方案

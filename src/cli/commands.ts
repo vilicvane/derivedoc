@@ -9,9 +9,11 @@ import {
   findProjectRoot,
   initProject,
   writeDocsDir,
+  type InitResult,
   type WorkspacePaths,
 } from '../core/project.ts';
 import {DocStore} from '../core/store.ts';
+import {installCodexIntegration, runCodexPromptSubmit} from '../hooks/codex.ts';
 import {readSelection} from '../core/selection.ts';
 import type {DocKind} from '../core/types.ts';
 import {CliError} from './args.ts';
@@ -25,6 +27,7 @@ export interface CommandOptions {
 
 /** 子命令名。第一位 positional 命中这些名字时按「在 cwd 里跑子命令」解释。 */
 export const COMMANDS = new Set([
+  'init',
   'root',
   'ls',
   'read',
@@ -33,6 +36,7 @@ export const COMMANDS = new Set([
   'append',
   'rm',
   'selection',
+  'hook',
 ]);
 
 /** agent 与人都用这几个子命令读写文档，服务不必启动。 */
@@ -44,6 +48,8 @@ export async function runCommand(
   options: CommandOptions,
 ): Promise<void> {
   switch (command) {
+    case 'init':
+      return initializeProject(projectDir, docDir, rest, options);
     case 'root':
       return printProjectRoot(projectDir, docDir, options);
     case 'ls':
@@ -60,11 +66,86 @@ export async function runCommand(
       return removeDoc(projectDir, docDir, takeId(rest, 'rm').id, options);
     case 'selection':
       return printSelection(projectDir, docDir, options);
+    case 'hook':
+      return runHook(projectDir, rest);
     default:
       throw new CliError(
         `未知子命令：${command}（可用：${[...COMMANDS].join('、')}；省略子命令则启动服务）`,
       );
   }
+}
+
+/** 显式初始化完整项目：两层文档、项目规则和 Codex 项目钩子。 */
+async function initializeProject(
+  projectDir: string,
+  docDir: string | undefined,
+  rest: string[],
+  options: CommandOptions,
+): Promise<void> {
+  if (rest.length > 0) {
+    throw new CliError(`init 不接受额外参数：${rest.join(' ')}`);
+  }
+
+  const existing = await describeWorkspace(projectDir, docDir);
+  let workspace: WorkspacePaths;
+  let initialized: InitResult;
+
+  if (existing.exists) {
+    if (docDir) {
+      await writeDocsDir(existing.root, existing.docs);
+    }
+
+    workspace = {root: existing.root, docs: existing.docs};
+    initialized = await initProject(workspace.root, workspace.docs);
+  } else {
+    const created = await createWorkspace(projectDir, docDir ?? DEFAULT_DOCS_DIR);
+    workspace = {root: created.root, docs: created.docs};
+    initialized = created.init;
+  }
+
+  const codex = await installCodexIntegration(workspace.root);
+
+  if (options.json) {
+    printJson({
+      root: workspace.root,
+      docs: workspace.docs,
+      created: [...initialized.created, ...codex.created],
+      updated: codex.updated,
+    });
+    return;
+  }
+
+  const docs = path.relative(workspace.root, workspace.docs) || '.';
+  const changes = [
+    ...initialized.created.map(item => `新建 ${item}`),
+    ...codex.created.map(item => `新建 ${item}`),
+    ...codex.updated.map(item => `更新 ${item}`),
+  ];
+
+  process.stdout.write(
+    [
+      `derivedoc 已初始化 ${workspace.root}`,
+      `  文档目录  ${docs === '.' ? '.' : `${docs}/`}`,
+      `  Codex      .codex/hooks.json`,
+      `  项目规则  ${path.join(workspace.root, 'DERIVEDOC.md')}`,
+      ...(changes.length > 0 ? changes.map(item => `  ${item}`) : ['  没有需要补齐的文件']),
+      '',
+    ].join('\n'),
+  );
+}
+
+/** 这是 hooks.json 调用的内部命令，正常不需要人手工运行。 */
+async function runHook(projectDir: string, rest: string[]): Promise<void> {
+  const [event, ...extra] = rest;
+
+  if (event !== 'codex-prompt-submit' || extra.length > 0) {
+    throw new CliError('hook 目前只支持 codex-prompt-submit');
+  }
+
+  await runCodexPromptSubmit({
+    ...(projectDir === '.' ? {} : {workspaceRoot: path.resolve(projectDir)}),
+    cliEntry: path.resolve(process.argv[1]!),
+  });
 }
 
 /** 目录不构成工作区时怎么救：是上层项目的一部分，还是从头建。 */

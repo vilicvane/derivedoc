@@ -48,6 +48,7 @@ const HELP = `derivedoc — source 沉淀决定，derived 承载方案
   不给子命令就启动服务（web 界面 + MCP）。
 
 子命令
+  dd [<项目根>] init [--doc-dir=<文档目录>]  初始化文档、项目规则与 Codex 钩子
   dd [<项目根>] root [--json]                打印项目根与文档目录；不在工作区则退出码 1
   dd [<项目根>] ls [--kind source|derived]   列出文档
   dd [<项目根>] read <id>                    打印正文（--json 输出完整结构）
@@ -74,6 +75,8 @@ const HELP = `derivedoc — source 沉淀决定，derived 承载方案
   -v, --version            显示版本
 
 示例
+  derivedoc init                        # 完整初始化当前项目（含 Codex 项目钩子）
+  derivedoc init --doc-dir=prd          # 文档放 prd/，项目钩子仍放根目录
   dd                                     # 建工作区：项目根是当前目录，文档在 ddoc/
   dd . --doc-dir=prd                     # 文档改放 prd/
   dd ./app --doc-dir=.                   # 项目根与文档目录都是 ./app
